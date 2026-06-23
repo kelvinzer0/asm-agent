@@ -33,6 +33,7 @@ extern command_buf
 ; --- External functions ---
 extern str_len
 extern str_copy
+extern str_concat
 extern str_find
 extern str_starts_with
 extern uint_to_str
@@ -48,6 +49,7 @@ global orchestration_check_handoff
 global orchestration_handoff
 global orchestration_get_delay
 global orchestration_log_state
+global orchestration_validate_handoff
 global current_mode
 global checkpoint_data
 
@@ -87,6 +89,22 @@ orch_fmt_mode:      db 'Mode: ', 0
 orch_fmt_sep:       db ' | ', 0
 orch_fmt_iteration: db 'Iter: ', 0
 orch_fmt_streak:    db 'Streak: ', 0
+
+; Invalid handoff log messages
+wl_orch_invalid:          db 'ORCHESTRATION', 0
+invalid_handoff_prefix:   db 'Invalid handoff rejected: ', 0
+invalid_handoff_from:     db ' -> ', 0
+invalid_handoff_suffix:   db ' (not in graph edges)', 10, 0
+
+; --- Graph Edge Table ---
+; Bitmask of valid target modes per source mode
+; Bit 0=PLANNER 1=RESEARCHER 2=EXECUTOR 3=VERIFIER 4=DONE
+graph_edges:
+    db 0b00000010  ; PLANNER    -> RESEARCHER
+    db 0b00000100  ; RESEARCHER -> EXECUTOR
+    db 0b00011010  ; EXECUTOR   -> RESEARCHER, VERIFIER, DONE
+    db 0b00000110  ; VERIFIER   -> RESEARCHER, EXECUTOR
+    db 0b00000000  ; DONE       -> nowhere
 
 ; Handoff prefixes (exported for parser.asm)
 global handoff_prefix
@@ -230,18 +248,78 @@ orchestration_check_handoff:
 
 .found_planner:
     mov     r12d, MODE_PLANNER
-    jmp     .not_found
+    jmp     .validate_edge
 .found_researcher:
     mov     r12d, MODE_RESEARCHER
-    jmp     .not_found
+    jmp     .validate_edge
 .found_executor:
     mov     r12d, MODE_EXECUTOR
-    jmp     .not_found
+    jmp     .validate_edge
 .found_verifier:
     mov     r12d, MODE_VERIFIER
-    jmp     .not_found
+    jmp     .validate_edge
 .found_done:
     mov     r12d, MODE_DONE
+
+.validate_edge:
+    ; Skip validation for DONE (terminal state, always allowed)
+    ; and for -1 (no handoff found)
+    cmp     r12d, -1
+    je      .not_found
+    cmp     r12d, MODE_DONE
+    je      .not_found
+
+    ; Call orchestration_validate_handoff(target=r12d)
+    mov     edi, r12d
+    call    orchestration_validate_handoff
+    test    rax, rax
+    jnz     .not_found              ; valid edge → proceed
+
+    ; --- Invalid edge: log warning and reject ---
+    push    rax
+    push    rcx
+    push    rdx
+
+    ; Build warning: "Invalid handoff rejected: <from> -> <to> (not in graph edges)\n"
+    lea     rdi, [rel temp_buf]
+    lea     rsi, [rel invalid_handoff_prefix]
+    call    str_copy
+
+    ; Append source mode name
+    movzx   eax, byte [current_mode]
+    lea     rcx, [rel mode_names]
+    mov     rsi, [rcx + rax * 8]
+    lea     rdi, [rel temp_buf]
+    call    str_concat
+
+    ; Append " -> "
+    lea     rsi, [rel invalid_handoff_from]
+    lea     rdi, [rel temp_buf]
+    call    str_concat
+
+    ; Append target mode name
+    mov     eax, r12d
+    lea     rcx, [rel mode_names]
+    mov     rsi, [rcx + rax * 8]
+    lea     rdi, [rel temp_buf]
+    call    str_concat
+
+    ; Append suffix
+    lea     rsi, [rel invalid_handoff_suffix]
+    lea     rdi, [rel temp_buf]
+    call    str_concat
+
+    ; Log to worklog
+    lea     rdi, [rel wl_orch_invalid]
+    lea     rsi, [rel temp_buf]
+    call    worklog_append_entry
+
+    pop     rdx
+    pop     rcx
+    pop     rax
+
+    ; Reject: treat as no handoff
+    mov     r12d, -1
 
 .not_found:
     mov     rax, r12
@@ -290,6 +368,21 @@ orchestration_get_delay:
     ret
 
 ; ============================================================================
+; orchestration_validate_handoff — Check if handoff follows graph edges
+; Input:  dil = target mode
+; Returns: rax = 1 if valid, 0 if invalid
+orchestration_validate_handoff:
+    movzx   eax, byte [current_mode]
+    lea     rcx, [rel graph_edges]
+    movzx   edx, byte [rcx + rax]
+    mov     ecx, edi
+    mov     eax, 1
+    shl     eax, cl
+    and     eax, edx
+    setnz   al
+    movzx   eax, al
+    ret
+
 ; orchestration_log_state — Log current orchestration state
 ; ============================================================================
 orchestration_log_state:

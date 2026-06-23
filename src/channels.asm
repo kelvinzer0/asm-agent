@@ -42,6 +42,7 @@ global channel_set_mask
 global channel_is_active
 global channel_write_debug
 global channel_write_error
+global channel_flush_all
 
 ; ============================================================================
 section .data
@@ -290,3 +291,60 @@ channel_write_debug:
 channel_write_error:
     mov     rdx, CH_HARP
     jmp     channel_route
+
+; ============================================================================
+; channel_flush_all — Flush all buffered channel data
+; ============================================================================
+channel_flush_all:
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    r12
+
+    ; Flush error buffer (Harp) -> stderr
+    lea     r12, [rel channel_error_buf]
+    mov     rbx, [rel channel_error_ptr]
+    sub     rbx, r12
+    test    rbx, rbx
+    jz      .fl_e_done
+    mov     rax, SYS_WRITE
+    mov     edi, STDERR
+    lea     rsi, [rel channel_error_buf]
+    mov     rdx, rbx
+    syscall
+    lea     rax, [rel channel_error_buf]
+    mov     [rel channel_error_ptr], rax
+.fl_e_done:
+
+    ; Flush debug buffer (Tenor) -> stderr
+    lea     r12, [rel channel_debug_buf]
+    mov     rbx, [rel channel_debug_ptr]
+    sub     rbx, r12
+    test    rbx, rbx
+    jz      .fl_d_done
+    mov     rax, SYS_WRITE
+    mov     edi, STDERR
+    lea     rsi, [rel channel_debug_buf]
+    mov     rdx, rbx
+    syscall
+    lea     rax, [rel channel_debug_buf]
+    mov     [rel channel_error_ptr], rax
+.fl_d_done:
+
+    ; Flush event buffer (Timpani) -> worklog
+    lea     r12, [rel channel_event_buf]
+    mov     rbx, [rel channel_event_ptr]
+    sub     rbx, r12
+    test    rbx, rbx
+    jz      .fl_v_done
+    mov     byte [r12 + rbx], 0
+    lea     rdi, [rel channel_event_buf]
+    call    worklog_append_raw
+    lea     rax, [rel channel_event_buf]
+    mov     [rel channel_event_ptr], rax
+.fl_v_done:
+
+    pop     r12
+    pop     rbx
+    pop     rbp
+    ret

@@ -8,7 +8,7 @@
 #   make clean    — Remove build artifacts
 # ============================================================================
 
-ASM       = nasm
+ASM       = ./nasm
 ASMFLAGS  = -f elf64 -I include/
 LD        = ld
 LDFLAGS   =
@@ -36,39 +36,39 @@ OBJS = $(SRCS:.asm=.o)
 .PHONY: all debug _debug_link clean run
 
 all: $(TARGET)
-	@echo ""
-	@echo "  ✅ Build complete: ./$(TARGET)"
-	@echo "  📦 Size: $$(stat -c %s $(TARGET)) bytes"
-	@echo "  🔗 Dependencies: $$(ldd $(TARGET) 2>&1 | head -1)"
-	@echo ""
+        @echo ""
+        @echo "  ✅ Build complete: ./$(TARGET)"
+        @echo "  📦 Size: $$(stat -c %s $(TARGET)) bytes"
+        @echo "  🔗 Dependencies: $$(ldd $(TARGET) 2>&1 | head -1)"
+        @echo ""
 
 $(TARGET): $(OBJS)
-	$(LD) -o $@ $^
-	strip $@
+        $(LD) -o $@ $^
+        strip $@
 
 # Pattern rule: .asm → .o
 src/%.o: src/%.asm include/constants.inc include/macros.inc include/config.inc include/musical.inc include/orchestration.inc
-	$(ASM) $(ASMFLAGS) -o $@ $<
+        $(ASM) $(ASMFLAGS) -o $@ $<
 
 # Debug build (with DWARF symbols, no strip)
 debug: ASMFLAGS += -g -F dwarf
 debug: clean
-	@$(MAKE) ASMFLAGS="$(ASMFLAGS)" LDFLAGS="" _debug_link
+        @$(MAKE) ASMFLAGS="$(ASMFLAGS)" LDFLAGS="" _debug_link
 
 _debug_link: $(OBJS)
-	$(LD) -o $(TARGET) $^
-	@echo ""
-	@echo "  🔧 Debug build complete: ./$(TARGET)"
-	@echo ""
+        $(LD) -o $(TARGET) $^
+        @echo ""
+        @echo "  🔧 Debug build complete: ./$(TARGET)"
+        @echo ""
 
 # Run
 run: all
-	@echo "  🚀 Launching ASM-AGENT..."
-	@echo ""
-	@./$(TARGET)
+        @echo "  🚀 Launching ASM-AGENT..."
+        @echo ""
+        @./$(TARGET)
 
 # Clean
 clean:
-	rm -f src/*.o $(TARGET)
-	rm -f /tmp/.asm_agent_payload.json
-	@echo "  🧹 Cleaned."
+        rm -f src/*.o $(TARGET)
+        rm -f /tmp/.asm_agent_payload.json
+        @echo "  🧹 Cleaned."

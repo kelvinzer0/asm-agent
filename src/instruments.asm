@@ -133,14 +133,16 @@ instrument_select:
     push    rbx
     push    r12
     push    r13
+    push    r14
 
     lea     rbx, [rel musical_state]
     movzx   r12d, byte [rbx + MS_DYNAMICS]  ; r12 = current dynamics
 
     ; Default to trumpet (shell_exec)
     mov     r13d, INST_TRUMPET
+    mov     r14d, -1          ; best success rate
 
-    ; Filter instruments by dynamics level
+    ; Scan ALL instruments, pick highest rate meeting dynamics
     xor     ecx, ecx            ; ecx = instrument index
     lea     rsi, [rel inst_min_dynamics]
 
@@ -150,19 +152,21 @@ instrument_select:
 
     movzx   eax, byte [rsi + rcx]
     cmp     eax, r12d
-    jg      .dyn_skip           ; instrument requires higher dynamics
+    jg      .dyn_skip2           ; instrument requires higher dynamics
 
     ; This instrument is available — check success rate
     push    rcx
-    call    .get_success_rate   ; eax = success rate (0-100)
+    call    .get_success_rate
+    mov     edx, eax
     pop     rcx
 
-    ; Keep the instrument with highest success rate
-    ; (for now, just pick the first available one)
+    ; Keep highest success rate
+    cmp     edx, r14d
+    jle     .dyn_skip2
     mov     r13d, ecx
-    jmp     .dyn_done
+    mov     r14d, edx
 
-.dyn_skip:
+.dyn_skip2:
     inc     ecx
     jmp     .dyn_loop
 
@@ -170,6 +174,7 @@ instrument_select:
     mov     byte [rel current_instrument], r13b
     mov     rax, r13
 
+    pop     r14
     pop     r13
     pop     r12
     pop     rbx

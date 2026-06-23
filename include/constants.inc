@@ -20,6 +20,7 @@
 %define SYS_EXIT            60
 %define SYS_WAIT4           61
 %define SYS_UNLINK          87
+%define SYS_GETCWD          79
 %define SYS_CLOCK_GETTIME   228
 %define SYS_GETRANDOM       318
 

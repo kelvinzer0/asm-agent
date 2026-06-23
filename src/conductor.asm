@@ -39,6 +39,8 @@ global conductor_init
 global conductor_beat
 global conductor_adjust_tempo
 global conductor_adjust_dynamics
+global conductor_apply_rhythm
+global conductor_set_rhythm
 global conductor_next_measure
 global conductor_get_delay_ns
 global conductor_should_stop
@@ -64,6 +66,40 @@ dynamic_down_threshold equ 2    ; N failures → decrease dynamics
 ; ============================================================================
 section .rodata
 ; ============================================================================
+
+rhythm_steady_mults:
+    dq 256, 256
+rhythm_accel_mults:
+    dq 256, 256, 256, 200, 150, 100
+rhythm_decel_mults:
+    dq 100, 150, 200, 300, 400, 500
+rhythm_call_resp_mults:
+    dq 300, 80
+rhythm_waltz_mults:
+    dq 350, 30, 30
+rhythm_swing_mults:
+    dq 300, 50, 200
+rhythm_syncopated_mults:
+    dq 350, 50, 30, 300
+
+; Number of beats per cycle for each rhythm pattern
+rhythm_cycle_len:
+    db 2    ; STEADY: 2 beats
+    db 6    ; ACCEL: 6 beats
+    db 6    ; DECEL: 6 beats
+    db 2    ; CALL_RESPONSE: 2 beats
+    db 3    ; WALTZ: 3 beats
+    db 3    ; SWING: 3 beats
+    db 4    ; SYNCOPATED: 4 beats
+
+rhythm_mult_tables:
+    dq rhythm_steady_mults
+    dq rhythm_accel_mults
+    dq rhythm_decel_mults
+    dq rhythm_call_resp_mults
+    dq rhythm_waltz_mults
+    dq rhythm_swing_mults
+    dq rhythm_syncopated_mults
 
 ; Worklog labels for musical state logging
 wl_musical_state db 'MUSICAL STATE', 0
@@ -252,10 +288,10 @@ conductor_adjust_tempo:
     cmp     eax, tempo_decel_threshold
     jl      .tempo_done
 
-    ; Slow down: increment tempo index (higher index = slower)
+    ; Slow down: decrement tempo index (lower index = slower)
     movzx   eax, byte [rbx + MS_TEMPO]
-    cmp     eax, TEMPO_LARGO
-    jle     .tempo_clamp_lo
+    test    eax, eax
+    jz      .tempo_clamp_lo
     dec     al
     mov     byte [rbx + MS_TEMPO], al
     ; Update beat interval
@@ -284,7 +320,7 @@ conductor_adjust_tempo:
     cmp     eax, tempo_accel_threshold
     jl      .tempo_done
 
-    ; Speed up: decrement tempo index (lower index = faster)
+    ; Speed up: increment tempo index (higher index = faster)
     movzx   eax, byte [rbx + MS_TEMPO]
     cmp     eax, TEMPO_PRESTISSIMO
     jge     .tempo_clamp_hi
@@ -385,9 +421,51 @@ conductor_next_measure:
 ; ============================================================================
 ; Returns: rax = delay in nanoseconds
 ; ============================================================================
-conductor_get_delay_ns:
+conductor_set_rhythm:
     lea     rax, [rel musical_state]
-    mov     rax, [rax + MS_BEAT_NS]
+    mov     byte [rax + MS_RHYTHM_PATTERN], dil
+    ret
+
+; conductor_apply_rhythm — Modulate delay by rhythm pattern (fp 8.8)
+conductor_apply_rhythm:
+    push    rbx
+    push    r12
+    push    r13
+    lea     rbx, [rel musical_state]
+    mov     rax, [rbx + MS_BEAT_NS]
+    test    rax, rax
+    jz      .ry_zero
+    mov     r12, rax
+    movzx   ecx, byte [rbx + MS_RHYTHM_PATTERN]
+    cmp     ecx, RHYTHM_COUNT
+    jb      .ry_idx_ok
+    mov     ecx, RHYTHM_STEADY
+.ry_idx_ok:
+    lea     r13, [rel rhythm_cycle_len]
+    movzx   r13, byte [r13 + rcx]
+    mov     eax, dword [rbx + MS_BEAT_COUNTER]
+    xor     edx, edx
+    div     r13d
+    lea     rsi, [rel rhythm_mult_tables]
+    mov     rsi, [rsi + rcx * 8]
+    mov     rdx, [rsi + rdx * 8]
+    mov     rax, r12
+    imul    rdx
+    shr     rax, 8
+    cmp     rax, 100000000
+    jae     .ry_done
+    mov     rax, 100000000
+    jmp     .ry_done
+.ry_zero:
+    xor     eax, eax
+.ry_done:
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
+conductor_get_delay_ns:
+    call    conductor_apply_rhythm
     ret
 
 ; ============================================================================

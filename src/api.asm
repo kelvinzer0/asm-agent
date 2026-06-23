@@ -26,11 +26,19 @@ extern str_len              ; str_len(rdi=str) -> rax (length)
 extern str_copy             ; str_copy(rdi=dst, rsi=src) -> rax
 extern str_concat           ; str_concat(rdi=dst, rsi=src) -> rax
 extern str_starts_with      ; str_starts_with(rdi=str, rsi=prefix) -> rax
+extern uint_to_str          ; uint_to_str(rdi=buf, esi=value) -> rax
+extern worklog_append_entry ; worklog_append_entry(rdi=label, rsi=msg)
+extern temp_buf             ; TEMP_BUF_SZ bytes — general purpose temp
 
 ; ---------------------------------------------------------------------------
 ; Public API
 ; ---------------------------------------------------------------------------
 global call_api
+global call_api_retry
+
+; --- Retry Constants ---
+%define API_MAX_RETRIES      3
+%define API_BACKOFF_BASE_NS  1000000000   ; 1 second base
 
 ; ============================================================================
 ;                         READ-ONLY DATA
@@ -46,6 +54,12 @@ curl_data_arg:      db '@/tmp/.asm_agent_payload.json', 0
 env_asm_key_prefix: db 'ASM_AGENT_API_KEY=', 0
 env_openai_key_prefix: db 'OPENAI_API_KEY=', 0
 missing_api_key_msg: db 'Missing API key. Set ASM_AGENT_API_KEY or OPENAI_API_KEY in the environment.', 10, 0
+
+retry_log_label:  db 'API_RETRY', 0
+retry_msg_prefix: db 'API call failed, retrying in ', 0
+retry_msg_suffix: db 's (attempt ', 0
+retry_msg_of:     db '/', 0
+retry_msg_end:    db ')', 10, 0
 
 section .bss
 auth_header_buf:    resb 4096
@@ -409,4 +423,177 @@ build_auth_header:
     pop     r13
     pop     r12
     pop     rbx
+    ret
+
+; ============================================================================
+; call_api_retry — Call API with exponential backoff retry on failure
+; ----------------------------------------------------------------------------
+; Wraps call_api with up to API_MAX_RETRIES retries.
+; On each failure, waits 2^attempt seconds before retrying.
+; Arguments : none (reads/writes same globals as call_api)
+; Returns   : rax = response length on success (>= 0)
+;             rax = -1 on error (all retries exhausted)
+; Clobbers  : caller-saved registers
+; ============================================================================
+call_api_retry:
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    sub     rsp, 16                  ; local space for uint_to_str
+
+    xor     r14d, r14d              ; r14 = retry counter (0-based)
+    xor     r15d, r15d              ; r15 = backoff seconds (1, 2, 4, ...)
+
+.retry_loop:
+    ; Call the actual API
+    call    call_api
+    test    rax, rax
+    jns     .success                ; rax >= 0 → success, return it
+
+    ; Failed — check if we have retries left
+    inc     r14d
+    cmp     r14d, API_MAX_RETRIES
+    jge     .all_failed
+
+    ; Compute backoff: r15 *= 2
+    shl     r15d, 1
+
+    ; Log retry message to worklog: "API call failed, retrying in Ns (attempt X/3)"
+    lea     rdi, [rsp]
+    lea     rsi, [rel retry_msg_prefix]
+    call    .copy_str_to_rsp
+
+    ; Convert backoff seconds to string
+    mov     rdi, rsp
+    mov     esi, r15d
+    push    rbx
+    mov     rbx, rdi
+    sub     rsp, 16
+    mov     rdi, rsp
+    call    uint_to_str
+    mov     rdi, rbx
+    mov     rsi, rsp
+    call    .copy_str_to_rsp
+    add     rsp, 16
+    pop     rbx
+
+    ; Append "s (attempt "
+    lea     rdi, [rsp]
+    lea     rsi, [rel retry_msg_suffix]
+    call    .copy_str_to_rsp
+
+    ; Append attempt number
+    mov     rdi, rsp
+    mov     esi, r14d
+    push    rbx
+    mov     rbx, rdi
+    sub     rsp, 16
+    mov     rdi, rsp
+    call    uint_to_str
+    mov     rdi, rbx
+    mov     rsi, rsp
+    call    .copy_str_to_rsp
+    add     rsp, 16
+    pop     rbx
+
+    ; Append "/MAX)"
+    lea     rdi, [rsp]
+    lea     rsi, [rel retry_msg_of]
+    call    .copy_str_to_rsp
+
+    mov     rdi, rsp
+    mov     esi, API_MAX_RETRIES
+    push    rbx
+    mov     rbx, rdi
+    sub     rsp, 16
+    mov     rdi, rsp
+    call    uint_to_str
+    mov     rdi, rbx
+    mov     rsi, rsp
+    call    .copy_str_to_rsp
+    add     rsp, 16
+    pop     rbx
+
+    lea     rdi, [rsp]
+    lea     rsi, [rel retry_msg_end]
+    call    .copy_str_to_rsp
+
+    ; Null-terminate
+    mov     byte [rsp + r12], 0    ; r12 tracks position from .copy_str_to_rsp
+    lea     rdi, [rel temp_buf]
+    mov     rsi, rsp
+    call    str_copy
+
+    ; Write to worklog
+    lea     rdi, [rel retry_log_label]
+    lea     rsi, [rel temp_buf]
+    call    worklog_append_entry
+
+    ; Sleep for backoff period: r15 seconds
+    ; nanosleep({sec = r15, nsec = 0}, NULL)
+    mov     rdi, rsp               ; use local space for timespec
+    xor     eax, eax
+    mov     [rsp], r15d            ; tv_sec
+    mov     [rsp + 4], eax         ; tv_sec high dword
+    mov     [rsp + 8], eax         ; tv_nsec
+    mov     [rsp + 12], eax        ; tv_nsec high dword
+    xor     esi, esi               ; NULL (no remainder)
+    mov     eax, SYS_NANOSLEEP
+    syscall
+
+    jmp     .retry_loop
+
+.success:
+    add     rsp, 16
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    pop     rbp
+    ret
+
+.all_failed:
+    mov     rax, -1
+    add     rsp, 16
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    pop     rbp
+    ret
+
+; --- Helper: append string to rsp position, advance r12 ---
+; rdi = destination base (rsp), rsi = source string
+.copy_str_to_rsp:
+    ; r12 holds current write offset into rsp buffer
+    ; On first call, r12 might be 0; let's use a simple approach:
+    ; scan from rdi for null terminator to find current end
+    push    rax
+    push    rcx
+    mov     rcx, rdi
+    xor     al, al
+.crs_find_end:
+    cmp     byte [rcx], 0
+    je      .crs_found_end
+    inc     rcx
+    jmp     .crs_find_end
+.crs_found_end:
+    ; rcx = end of string in rdi buffer
+.crs_copy:
+    lodsb
+    test    al, al
+    jz      .crs_done
+    mov     [rcx], al
+    inc     rcx
+    jmp     .crs_copy
+.crs_done:
+    mov     r12, rcx              ; save end position for caller
+    pop     rcx
+    pop     rax
     ret

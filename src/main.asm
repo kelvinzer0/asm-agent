@@ -37,7 +37,7 @@ extern build_payload
 extern parse_response
 extern exec_command
 extern check_blocked
-extern call_api
+extern call_api_retry
 
 ; --- Musical Orchestration externs ---
 extern conductor_init
@@ -299,7 +299,7 @@ _start:
     ; getcwd(buf, size)
     lea     rdi, [rel cwd_buf]
     mov     rsi, 1024
-    mov     rax, 79              ; SYS_GETCWD
+    mov     rax, SYS_GETCWD
     syscall
     ; Calculate cwd_len
     lea     rdi, [rel cwd_buf]
@@ -434,8 +434,8 @@ _start:
     call    build_payload
     ; rax = payload length (in payload_buf)
 
-    ; --- Phase 3: Call API ---
-    call    call_api
+    ; --- Phase 3: Call API (with retry + exponential backoff) ---
+    call    call_api_retry
     test    rax, rax
     js      .api_error
     ; rax = response length (in response_buf)
