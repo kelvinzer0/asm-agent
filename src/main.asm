@@ -158,6 +158,8 @@ tui_error_pre db ESC, '[1m', ESC, '[38;5;203m'
 tui_blocked_msg db 'Command blocked by safety filter!', 10, 0
 tui_api_err_msg db 'API call failed or returned error.', 10, 0
 tui_parse_err   db 'Could not parse LLM response.', 10, 0
+api_err_json_prefix db '{"error"', 0
+api_retry_warn  db 'API returned error response, retrying...', 10, 0
 streak_warn_msg db 'WARNING: You have executed the same command ', MAX_CONSECUTIVE_EXEC+'0', ' times in a row. '
                 db 'The command is not achieving new results. '
                 db 'Please analyze the output carefully and either: '
@@ -425,11 +427,15 @@ _start:
     ; --- Log orchestration state ---
     call    orchestration_log_state
 
+    ; --- Log musical/conductor state ---
+    call    conductor_log_state
+
     ; --- Phase 1: Read WORKLOG context ---
     call    worklog_read_context
     ; rax = context length (in worklog_buf)
 
     ; --- Phase 2: Build JSON payload ---
+.api_call_phase:
     PRINT   STDOUT, tui_calling_api
     call    build_payload
     ; rax = payload length (in payload_buf)
@@ -614,8 +620,10 @@ _start:
     lea     rsi, [rel think_streak_warn]
     call    str_copy
 
-    ; Reset streak
-    mov     dword [rel think_streak], 0
+    ; Reset streak to MAX-1 so next think triggers warning immediately
+    mov     eax, MAX_CONSECUTIVE_THINK
+    dec     eax
+    mov     dword [rel think_streak], eax
 
     ; Log as THINK
     lea     rdi, [wl_label_thought]
@@ -706,8 +714,11 @@ _start:
     PRINT   STDOUT, ansi_reset
     PRINT   STDOUT, newline
 
-    ; Reset streak to allow retry after model reconsiders
-    mov     dword [rel exec_streak], 0
+    ; Reset streak to MAX-1 so same command triggers warning immediately
+    ; (prevents infinite repeat loops — command never executes again)
+    mov     eax, MAX_CONSECUTIVE_EXEC
+    dec     eax
+    mov     dword [rel exec_streak], eax
     mov     dword [rel think_streak], 0
 
     ; Musical: log state when streak warning triggers
@@ -1055,6 +1066,22 @@ _start:
     EXIT    1
 
 .handle_parse_error:
+    ; Check if the response is an API error (e.g. 401/429/500)
+    ; API errors return JSON like {"error":{"message":"...","type":"..."}}
+    lea     rdi, [rel response_buf]
+    lea     rsi, [rel api_err_json_prefix]
+    call    str_starts_with
+    test    rax, rax
+    jz      .real_parse_error      ; not API error JSON → real parse failure
+
+    ; --- API error detected: retry the API call ---
+    PRINT   STDOUT, tui_error_pre
+    PRINT   STDOUT, api_retry_warn
+    PRINT   STDOUT, ansi_reset
+    call    delay_loop
+    jmp     .api_call_phase         ; go back to API call (skip re-reading worklog)
+
+.real_parse_error:
     PRINT   STDOUT, tui_error_pre
     PRINT   STDOUT, tui_parse_err
     PRINT   STDOUT, ansi_reset

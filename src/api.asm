@@ -61,6 +61,8 @@ retry_msg_suffix: db 's (attempt ', 0
 retry_msg_of:     db '/', 0
 retry_msg_end:    db ')', 10, 0
 
+api_error_prefix:  db '{"error"', 0
+
 section .bss
 auth_header_buf:    resb 4096
 
@@ -452,15 +454,21 @@ call_api_retry:
     ; Call the actual API
     call    call_api
     test    rax, rax
-    jns     .success                ; rax >= 0 → success, return it
+    js      .check_retry            ; rax < 0 → HTTP failure, maybe retry
+    jmp     .success                ; rax >= 0 → success
 
+.check_retry:
     ; Failed — check if we have retries left
     inc     r14d
     cmp     r14d, API_MAX_RETRIES
     jge     .all_failed
 
-    ; Compute backoff: r15 *= 2
+    ; Compute backoff: r15 = max(r15 * 2, 1) to ensure minimum 1s
     shl     r15d, 1
+    test    r15d, r15d
+    jnz     .backoff_ok
+    mov     r15d, 1
+.backoff_ok:
 
     ; Log retry message to worklog: "API call failed, retrying in Ns (attempt X/3)"
     lea     rdi, [rsp]
