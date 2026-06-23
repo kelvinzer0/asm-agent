@@ -94,9 +94,9 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "ASM-AGENT ${GITHUB_REF_NAME}"
+          name: "ASM-AGENT ${{ github.ref_name }}"
           body: |
-            ## ASM-AGENT ${GITHUB_REF_NAME}
+            ## ASM-AGENT ${{ github.ref_name }}
 
             **Autonomous coding agent written entirely in x86-64 NASM assembly.**
 
@@ -106,7 +106,7 @@ jobs:
             ```
 
             ### Or download manually
-            Download `asm-agent-${GITHUB_REF_NAME}-linux-x86_64.tar.gz` below.
+            Download `asm-agent-${{ github.ref_name }}-linux-x86_64.tar.gz` below.
 
             ### Usage
             ```bash
