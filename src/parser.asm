@@ -57,7 +57,9 @@ section .rodata
 ; JSON field keys to search for
 needle_content: db '"content"', 0
 needle_error:   db '"error"', 0
-needle_done_suffix: db 'data:', 0
+; SSE stream markers
+sse_data_prefix:  db 'data: ', 0
+sse_done_marker:  db 'data: [DONE]', 0
 
 ; XML tool_call tags
 needle_tool_open:  db '<tool_call>', 0
@@ -89,18 +91,77 @@ parse_response:
     push    rbx
 
     ; -------------------------------------------------------------------
-    ; Step 0: Strip "data: [DONE]" suffix if present
+    ; Step 0: Handle SSE streaming format
+    ; -------------------------------------------------------------------
+    ; If response starts with "data: ", the API returned SSE format even
+    ; though we requested stream:false.  Strip "data: " prefixes line by
+    ; line, remove "data: [DONE]" lines, keep the JSON payload.
     ; -------------------------------------------------------------------
     lea     rdi, [rel response_buf]
-    lea     rsi, [rel needle_done_suffix]
-    call    str_find
+    lea     rsi, [rel sse_data_prefix]
+    call    str_starts_with
     test    rax, rax
-    jz      .no_strip_done
-    ; Found "data:" — truncate response_buf here
-    mov     byte [rax], 0
-    ; Update response_len
-    sub     rax, rdi
+    jz      .no_strip_done        ; not SSE format — skip
+
+    ; --- SSE detected: in-place strip "data: " from each line ---
+    lea     r12, [rel response_buf]      ; r12 = read ptr
+    lea     r13, [rel response_buf]      ; r13 = write ptr
+    lea     r14, [rel response_buf]
+    add     r14, [rel response_len]      ; r14 = end of buffer
+
+.sse_line_loop:
+    cmp     r12, r14
+    jge     .sse_line_done
+
+    ; Check if this line starts with "data: "
+    lea     rdi, [rel sse_data_prefix]
+    mov     rsi, r12
+    call    str_starts_with
+    test    rax, rax
+    jz      .sse_copy_line         ; not "data: " — copy as-is
+
+    ; Is it "data: [DONE]" ? — skip entire line
+    lea     rdi, [rel sse_done_marker]
+    mov     rsi, r12
+    call    str_starts_with
+    jnz     .sse_skip_line          ; yes — skip this line
+
+    ; It is "data: {" — skip 6-byte "data: " prefix, copy rest
+    add     r12, 6
+    jmp     .sse_copy_line
+
+.sse_skip_line:
+    ; Advance r12 past this line to next newline
+.sse_skip_nl:
+    cmp     r12, r14
+    jge     .sse_line_done
+    movzx   eax, byte [r12]
+    inc     r12
+    cmp     al, 10                  ; LF = end of line
+    jne     .sse_skip_nl
+    jmp     .sse_line_loop
+
+.sse_copy_line:
+    ; Copy bytes from r12 to r13 until newline or end
+.sse_copy_byte:
+    cmp     r12, r14
+    jge     .sse_line_done
+    movzx   eax, byte [r12]
+    inc     r12
+    mov     [r13], al
+    inc     r13
+    cmp     al, 10                  ; LF = end of line
+    je      .sse_line_loop
+    jmp     .sse_copy_byte
+
+.sse_line_done:
+    ; Null-terminate and update response_len
+    mov     byte [r13], 0
+    mov     rax, r13
+    lea     rcx, [rel response_buf]
+    sub     rax, rcx
     mov     [rel response_len], rax
+
 .no_strip_done:
 
     ; -------------------------------------------------------------------

@@ -13,31 +13,29 @@ auth_header_prefix db 'Authorization: Bearer ', 0
 content_type    db 'Content-Type: application/json', 0
 
 ; --- Model ---
-model_name      db 'cf/@cf/meta/llama-3.1-8b-instruct-fp8-fast', 0
+model_name      db 'mmf/mimo-auto', 0
 
 ; --- System Prompt ---
 system_prompt:
-    db 'You are ASM-AGENT, an autonomous AI on Linux.', 10, 10
-    db 'HOW TO WORK:', 10
-    db '1. Read the TASK below carefully', 10
-    db '2. Read CONTEXT to see what you already did', 10
-    db '3. Do the NEXT step that is not yet done', 10
-    db '4. Never repeat a command that already succeeded', 10
-    db '5. When all steps complete, respond DONE:', 10, 10
-    db 'OUTPUT FORMAT (you MUST use these exact tags):', 10
-    db '  To execute a command:', 10
-    db '    <tool_call>', 10
-    db '    <command>', 10
-    db '    </tool_call>', 10
-    db '  To think/reason:', 10
-    db '  THINK: <reasoning>', 10
-    db '  When task is done:', 10
-    db '  DONE: <summary>', 10, 10
-    db 'IMPORTANT:', 10
-    db '- Commands WITHOUT <tool_call> tags will NOT be executed', 10
-    db '- Use absolute paths for file writes', 10
+    db 'You are ASM-AGENT, an autonomous AI agent on Linux.', 10, 10
+    db 'RULES:', 10
+    db '1. Read the TASK and CONTEXT carefully', 10
+    db '2. Do the NEXT step that is not yet done', 10
+    db '3. Never repeat a command that already succeeded', 10
+    db '4. When ALL steps complete, respond with DONE:', 10, 10
+    db 'OUTPUT FORMAT - you MUST use one of these exact prefixes:', 10
+    db '  EXEC: <shell command to run>', 10
+    db '  THINK: <your reasoning>', 10
+    db '  DONE: <summary of what was accomplished>', 10, 10
+    db 'CRITICAL INSTRUCTIONS:', 10
+    db '- Always start your response with EXEC:, THINK:, or DONE:', 10
+    db '- To write a Python file, use heredoc syntax:', 10
+    db '  EXEC: python3 -c "open(42).write(code)" for short files', 10
+    db '  ENDOFFILE', 10
     db '- Use python3 NOT python', 10
-    db '- Each step must do something NEW, not repeat', 0
+    db '- Use absolute paths for all file operations', 10
+    db '- NEVER say DONE until the requested files actually exist', 10
+    db '- DO NOT just run ls. Actually CREATE the requested files.', 0
 system_prompt_end:
 
 %define SYSTEM_PROMPT_LEN (system_prompt_end - system_prompt)
@@ -75,9 +73,9 @@ wl_bracket_end  db ']', 10, 0
 
 ; Tool call/response tags for structured output
 wl_tool_call_s  db '<tool_call id="', 0
-wl_tool_call_e  db '</tool_call>', 10, 0
+wl_tool_call_e  db 'u2715', 10, 0
 wl_tool_resp_s  db '<tool_response id="', 0
-wl_tool_resp_e  db '</tool_call>', 10, 0
+wl_tool_resp_e  db 'u2715', 10, 0
 
 ; --- Task prompt prefix ---
 task_prefix     db 'TASK: ', 0
