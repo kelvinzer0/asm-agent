@@ -386,25 +386,22 @@ messages_append_tr:
     lea     rsi, [rel msg_tool_result_mid]
     call    jl_copy_r12
 
-    ; Escape output_buf into temp_buf
-    lea     rdi, [rel temp_buf]
+    ; Escape output_buf directly into messages_buf (bypass temp_buf)
+    ; rdi = dst (r12 = current write position in messages_buf)
+    ; rsi = src (output_buf)
+    ; rdx = max bytes we can write (messages_buf end - current pos - 256 margin)
+    lea     rax, [rel messages_buf]
+    add     rax, MESSAGES_BUF_SZ - 256
+    sub     rax, r12
+    mov     rdx, rax
+    cmp     rdx, 2
+    jle     .tr_skip_output     ; not enough room, skip output
+    mov     rdi, r12
     lea     rsi, [rel output_buf]
-    mov     rdx, TEMP_BUF_SZ - 2
     call    str_escape_json
-    ; Copy from temp_buf to messages_buf (limit to reasonable size)
-    lea     rsi, [rel temp_buf]
-    lea     r13, [rel messages_buf]
-    add     r13, MESSAGES_BUF_SZ - 256  ; leave 256 bytes margin
-.tr_output_copy:
-    cmp     r12, r13
-    jge     .tr_output_done
-    lodsb
-    test    al, al
-    jz      .tr_output_done
-    mov     [r12], al
-    inc     r12
-    jmp     .tr_output_copy
-.tr_output_done:
+    ; rax = bytes written by str_escape_json
+    add     r12, rax
+.tr_skip_output:
 
     ; --- "} ---
     mov     byte [r12], '"'

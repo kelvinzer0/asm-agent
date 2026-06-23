@@ -477,9 +477,9 @@ _start:
 
     PRINT   STDOUT, tui_output_body_pre
     mov     rcx, [output_len]
-    cmp     rcx, 2048
+    cmp     rcx, OUTPUT_BUF_SZ - 1
     jle     .tc_out_len_ok
-    mov     rcx, 2048
+    mov     rcx, OUTPUT_BUF_SZ - 1
 .tc_out_len_ok:
     PRINT_LEN STDOUT, output_buf, rcx
     PRINT   STDOUT, ansi_reset
