@@ -19,7 +19,7 @@ Autonomous AI coding agent written entirely in **x86-64 NASM assembly**. No libc
 ## Quick Install (Latest Release)
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/kelvinzer0/asm-agent/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/kelvinzer0/asm-agent/master/install.sh | bash
 ```
 
 That's it. The installer will:
@@ -32,13 +32,13 @@ That's it. The installer will:
 ### Install a Specific Version
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/kelvinzer0/asm-agent/main/install.sh | bash -s -- --version v0.1.1
+curl -sSL https://raw.githubusercontent.com/kelvinzer0/asm-agent/master/install.sh | bash -s -- --version v0.1.1
 ```
 
 ### Custom Install Prefix
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/kelvinzer0/asm-agent/main/install.sh | bash -s -- --prefix $HOME/.local
+curl -sSL https://raw.githubusercontent.com/kelvinzer0/asm-agent/master/install.sh | bash -s -- --prefix $HOME/.local
 ```
 
 ## Setup

@@ -102,7 +102,7 @@ jobs:
 
             ### Install (one-liner)
             ```bash
-            curl -sSL https://raw.githubusercontent.com/kelvinzer0/asm-agent/main/install.sh | bash
+            curl -sSL https://raw.githubusercontent.com/kelvinzer0/asm-agent/master/install.sh | bash
             ```
 
             ### Or download manually
