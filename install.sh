@@ -171,10 +171,30 @@ fi
 ok "Extracted successfully"
 
 # --- Verify ELF binary ---
-if file "${EXTRACTED_DIR}/${BINARY_NAME}" | grep -q "ELF 64-bit"; then
-  ok "Binary verified: ELF 64-bit executable"
+if command -v file >/dev/null 2>&1; then
+  if file "${EXTRACTED_DIR}/${BINARY_NAME}" | grep -q "ELF 64-bit"; then
+    ok "Binary verified: ELF 64-bit executable"
+  else
+    fail "Downloaded file is not a valid ELF 64-bit binary!"
+  fi
+elif command -v xxd >/dev/null 2>&1; then
+  # Fallback: check ELF magic bytes (7f 45 4c 46) + 64-bit class (02)
+  MAGIC=$(xxd -l 5 -p "${EXTRACTED_DIR}/${BINARY_NAME}")
+  if [ "$MAGIC" = "7f454c4602" ]; then
+    ok "Binary verified: ELF 64-bit (magic bytes)"
+  else
+    fail "Downloaded file is not a valid ELF 64-bit binary! (magic: $MAGIC)"
+  fi
+elif command -v od >/dev/null 2>&1; then
+  # Fallback: od to check ELF magic
+  MAGIC=$(od -A n -t x1 -N 5 "${EXTRACTED_DIR}/${BINARY_NAME}" | tr -d ' ')
+  if [ "$MAGIC" = "7f454c4602" ]; then
+    ok "Binary verified: ELF 64-bit (magic bytes via od)"
+  else
+    fail "Downloaded file is not a valid ELF 64-bit binary! (magic: $MAGIC)"
+  fi
 else
-  fail "Downloaded file is not a valid ELF 64-bit binary!"
+  warn "'file' command not found — skipping binary verification"
 fi
 
 # --- Install ---
