@@ -123,6 +123,6 @@ jobs:
             ${{ env.ARCHIVE_NAME }}
             checksums.sha256
           draft: false
-          prerelease: ${{ contains(gITHUB_REF_NAME, '-') }}
+          prerelease: ${{ contains(github.ref_name, '-') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

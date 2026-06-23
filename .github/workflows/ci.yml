@@ -19,6 +19,9 @@ jobs:
       - name: Install NASM
         run: sudo apt-get update && sudo apt-get install -y nasm
 
+      - name: Symlink nasm
+        run: ln -sf $(which nasm) ./nasm
+
       - name: Build
         run: make clean && make
 
@@ -55,6 +58,9 @@ jobs:
 
       - name: Install NASM
         run: sudo apt-get update && sudo apt-get install -y nasm
+
+      - name: Symlink nasm
+        run: ln -sf $(which nasm) ./nasm
 
       - name: Build
         run: make clean && make
