@@ -1,0 +1,128 @@
+# ============================================================================
+# release.yml — Auto-release on version tag push
+# ============================================================================
+# Trigger: push tag matching v* (e.g. v0.1.0, v1.0.0-rc1)
+# What it does:
+#   1. Builds asm-agent from NASM source (static ELF64, no libc)
+#   2. Packages binary + installer into a tar.gz
+#   3. Creates a GitHub Release with the tar.gz and standalone binary
+#   4. Generates a checksums file (sha256)
+# ============================================================================
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install NASM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nasm
+
+      - name: Build release binary
+        run: |
+          # Download nasm binary referenced by Makefile
+          if [ ! -f ./nasm ] && [ -f ../nasm_2.16.03-1_amd64.deb ]; then
+            cp ../nasm_2.16.03-1_amd64.deb .
+          fi
+          if [ -f nasm_2.16.03-1_amd64.deb ]; then
+            dpkg-deb -x nasm_2.16.03-1_amd64.deb nasm-pkg
+            cp nasm-pkg/usr/bin/nasm ./nasm
+            chmod +x ./nasm
+            rm -rf nasm-pkg
+          fi
+          # If no local nasm deb, just use system nasm
+          if [ ! -f ./nasm ]; then
+            ln -sf $(which nasm) ./nasm
+          fi
+          make clean
+          make
+
+          # Verify binary
+          file ./asm-agent
+          ls -lh ./asm-agent
+          sha256sum ./asm-agent > asm-agent.sha256
+
+      - name: Prepare release assets
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          ARCHIVE="asm-agent-${VERSION}-linux-x86_64"
+
+          mkdir -p "$ARCHIVE"
+
+          # Copy binary
+          cp ./asm-agent "$ARCHIVE/asm-agent"
+          chmod +x "$ARCHIVE/asm-agent"
+
+          # Copy installer
+          cp ./install.sh "$ARCHIVE/install.sh"
+          chmod +x "$ARCHIVE/install.sh"
+
+          # Copy README if exists
+          if [ -f README.md ]; then
+            cp README.md "$ARCHIVE/README.md"
+          fi
+
+          # Create tarball
+          tar czf "${ARCHIVE}.tar.gz" "$ARCHIVE"
+
+          # Generate checksums for all assets
+          sha256sum "${ARCHIVE}.tar.gz" >> checksums.sha256
+          sha256sum ./asm-agent >> checksums.sha256
+
+          echo "ARCHIVE_NAME=${ARCHIVE}.tar.gz" >> $GITHUB_ENV
+          echo "ARCHIVE_DIR=${ARCHIVE}" >> $GITHUB_ENV
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+
+          # List what we have
+          echo "=== Release assets ==="
+          ls -lh "${ARCHIVE}.tar.gz" asm-agent checksums.sha256
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "ASM-AGENT ${GITHUB_REF_NAME}"
+          body: |
+            ## ASM-AGENT ${GITHUB_REF_NAME}
+
+            **Autonomous coding agent written entirely in x86-64 NASM assembly.**
+
+            ### Install (one-liner)
+            ```bash
+            curl -sSL https://raw.githubusercontent.com/kelvinzer0/asm-agent/main/install.sh | bash
+            ```
+
+            ### Or download manually
+            Download `asm-agent-${GITHUB_REF_NAME}-linux-x86_64.tar.gz` below.
+
+            ### Usage
+            ```bash
+            export ASM_AGENT_API_KEY="your-api-key"
+            asm-agent "Create a hello world Python script at /tmp/hello.py"
+            ```
+
+            ### Assets
+            - `asm-agent` — Standalone ELF64 binary (no dependencies)
+            - `asm-agent-*-linux-x86_64.tar.gz` — Tarball with binary + installer
+            - `checksums.sha256` — SHA-256 checksums
+          files: |
+            asm-agent
+            ${{ env.ARCHIVE_NAME }}
+            checksums.sha256
+          draft: false
+          prerelease: ${{ contains(gITHUB_REF_NAME, '-') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
