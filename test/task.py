@@ -1,0 +1,1 @@
+import json; import dataclasses; @dataclasses.dataclass class Task: id: int; title: str; description: str; priority: str; status: str; created_at: str; updated_at: str; tags: list[str]; due_date: str = None
