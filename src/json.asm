@@ -481,6 +481,10 @@ build_payload:
     jmp     .msg_copy
 .msg_copy_done:
 
+    ; --- Close the messages array: ] ---
+    mov     byte [r12], ']'
+    inc     r12
+
     ; --- tools_json (starts with ,) + tool_choice + temperature + closing } ---
     ; tools_json = ',"tools":[...],"tool_choice":"auto","temperature":0.2,...}'
     lea     rdi, [rel tools_json]

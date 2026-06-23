@@ -327,16 +327,17 @@ parse_response:
 
     ; --- Tool calls found! Parse the first one ---
     ; We need: id, function.name, function.arguments
+    ; NOTE: API field order is not guaranteed (arguments may come before name),
+    ; so we save a base pointer after "tool_calls" and search all fields from it.
 
     ; --- Extract tool call ID ---
     ; Find "id" after the tool_calls array
-    ; Skip past "tool_calls" to find the first "id" inside
     add     rax, 13            ; skip "tool_calls" (13 bytes)
-    mov     r13, rax
+    mov     r15, rax           ; r15 = base pointer for all field searches
 
     ; Find "id" within the tool_calls section
-    lea     rdi, [rel needle_id]
-    mov     rsi, r13
+    mov     rdi, r15
+    lea     rsi, [rel needle_id]
     call    str_find
     test    rax, rax
     jz      .parse_error
@@ -370,45 +371,9 @@ parse_response:
 .id_copy_done:
     mov     byte [r12], 0
 
-    ; --- Extract function name ---
-    ; Find "name" after the function object
-    lea     rdi, [rel needle_name]
-    mov     rsi, r13        ; search from current position
-    call    str_find
-    test    rax, rax
-    jz      .parse_error
-
-    add     rax, 6          ; skip "name" (6 bytes including quotes)
-    mov     r13, rax
-    ; Skip to opening quote
-.name_skip:
-    cmp     byte [r13], '"'
-    je      .name_found
-    inc     r13
-    cmp     r13, r14
-    jge     .parse_error
-    jmp     .name_skip
-
-.name_found:
-    inc     r13
-    lea     rdi, [rel tool_call_name_buf]
-    mov     r12, rdi
-.name_copy:
-    cmp     r13, r14
-    jge     .name_copy_done
-    movzx   eax, byte [r13]
-    inc     r13
-    cmp     al, '"'
-    je      .name_copy_done
-    mov     [r12], al
-    inc     r12
-    jmp     .name_copy
-.name_copy_done:
-    mov     byte [r12], 0
-
-    ; --- Extract function arguments ---
-    lea     rdi, [rel needle_arguments]
-    mov     rsi, r13
+    ; --- Extract function arguments (search from base r15 for any field order) ---
+    mov     rdi, r15
+    lea     rsi, [rel needle_arguments]
     call    str_find
     test    rax, rax
     jz      .parse_error
@@ -483,6 +448,41 @@ parse_response:
     jmp     .args_copy
 
 .args_copy_done:
+    mov     byte [r12], 0
+
+    ; --- Extract function name (search from base r15) ---
+    mov     rdi, r15
+    lea     rsi, [rel needle_name]
+    call    str_find
+    test    rax, rax
+    jz      .parse_error
+
+    add     rax, 6          ; skip "name" (6 bytes including quotes)
+    mov     r13, rax
+    ; Skip to opening quote
+.name_skip:
+    cmp     byte [r13], '"'
+    je      .name_found
+    inc     r13
+    cmp     r13, r14
+    jge     .parse_error
+    jmp     .name_skip
+
+.name_found:
+    inc     r13
+    lea     rdi, [rel tool_call_name_buf]
+    mov     r12, rdi
+.name_copy:
+    cmp     r13, r14
+    jge     .name_copy_done
+    movzx   eax, byte [r13]
+    inc     r13
+    cmp     al, '"'
+    je      .name_copy_done
+    mov     [r12], al
+    inc     r12
+    jmp     .name_copy
+.name_copy_done:
     mov     byte [r12], 0
 
     ; --- Determine action type based on function name ---
