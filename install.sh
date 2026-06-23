@@ -3,10 +3,10 @@
 # install.sh — One-liner installer for asm-agent
 # ============================================================================
 # Usage:
-#   curl -sSL https://raw.githubusercontent.com/kelvinzer0/asm-agent/main/install.sh | bash
+#   curl -sSL https://raw.githubusercontent.com/kelvinzer0/asm-agent/master/install.sh | bash
 #
 # Or with a specific version:
-#   curl -sSL https://raw.githubusercontent.com/kelvinzer0/asm-agent/main/install.sh | bash -s -- --version v0.1.0
+#   curl -sSL https://raw.githubusercontent.com/kelvinzer0/asm-agent/master/install.sh | bash -s -- --version v0.1.1
 #
 # Or with a custom install prefix:
 #   curl -sSL ... | bash -s -- --prefix /usr/local
@@ -80,121 +80,74 @@ echo ""
 # --- Preflight checks ---
 info "Checking dependencies..."
 
-# Check for curl
-command -v curl >/dev/null 2>&1 || fail "curl is required but not installed. Install with: sudo apt install curl"
+command -v curl >/dev/null 2>&1 || fail "curl is required. Install: sudo apt install curl"
 ok "curl found: $(command -v curl)"
 
-# Check for tar
-command -v tar >/dev/null 2>&1 || fail "tar is required but not installed."
-ok "tar found: $(command -v tar)"
-
-# Check for sha256sum
-command -v sha256sum >/dev/null 2>&1 || fail "sha256sum is required."
-ok "sha256sum found: $(command -v sha256sum)"
-
-# Check architecture
 ARCH=$(uname -m)
 if [ "$ARCH" != "x86_64" ]; then
-  fail "Unsupported architecture: $ARCH. asm-agent only supports x86_64 (amd64)."
+  fail "Unsupported architecture: $ARCH. asm-agent only supports x86_64."
 fi
 ok "Architecture: x86_64"
 
 # Check for write permission on install prefix
-if [ ! -w "$INSTALL_PREFIX" ] 2>/dev/null; then
-  if [ "$(id -u)" -ne 0 ]; then
-    warn "No write access to $INSTALL_PREFIX — will use sudo for installation."
-    NEED_SUDO=1
-  fi
+NEED_SUDO=0
+if [ ! -w "$INSTALL_PREFIX" ] 2>/dev/null && [ "$(id -u)" -ne 0 ]; then
+  warn "No write access to $INSTALL_PREFIX — will use sudo."
+  NEED_SUDO=1
 fi
-NEED_SUDO=${NEED_SUDO:-0}
 
 # --- Resolve version ---
 if [ -z "$VERSION" ]; then
   info "Fetching latest release version..."
   VERSION_JSON=$(curl -sSf "${GITHUB_API}/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest" 2>/dev/null) || {
-    # Fallback: try to list releases
-    info "Failed to get latest release, trying releases list..."
     VERSION_JSON=$(curl -sSf "${GITHUB_API}/repos/${REPO_OWNER}/${REPO_NAME}/releases" 2>/dev/null) || {
-      fail "Could not fetch release info from GitHub. Check your internet connection or the repo name."
+      fail "Could not fetch release info. Check internet or repo name."
     }
   }
   VERSION=$(echo "$VERSION_JSON" | grep -oP '"tag_name"\s*:\s*"\K[^"]+' | head -1)
-  if [ -z "$VERSION" ]; then
-    fail "Could not determine latest version. No releases found?"
-  fi
+  [ -z "$VERSION" ] && fail "Could not determine latest version."
 fi
 ok "Version: ${BOLD}${VERSION}${NC}"
 
-# --- Construct download URLs ---
-ARCHIVE_NAME="asm-agent-${VERSION}-linux-x86_64.tar.gz"
-DOWNLOAD_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${VERSION}/${ARCHIVE_NAME}"
+# --- Construct download URL (standalone binary) ---
+BINARY_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${VERSION}/${BINARY_NAME}"
 CHECKSUM_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${VERSION}/checksums.sha256"
-
-info "Download URL: ${DOWNLOAD_URL}"
 
 # --- Create temp directory ---
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
-# --- Download archive ---
-info "Downloading ${ARCHIVE_NAME}..."
-HTTP_CODE=$(curl -w '%{http_code}' -sSL -o "${TMPDIR}/${ARCHIVE_NAME}" "$DOWNLOAD_URL")
+# --- Download binary directly ---
+info "Downloading ${BINARY_NAME}..."
+HTTP_CODE=$(curl -w '%{http_code}' -sSL -o "${TMPDIR}/${BINARY_NAME}" "$BINARY_URL")
 if [ "$HTTP_CODE" -ne 200 ]; then
-  fail "Download failed (HTTP ${HTTP_CODE}). Check that version ${VERSION} exists at https://github.com/${REPO_OWNER}/${REPO_NAME}/releases"
+  fail "Download failed (HTTP ${HTTP_CODE}). Check https://github.com/${REPO_OWNER}/${REPO_NAME}/releases"
 fi
-ok "Downloaded $(du -h "${TMPDIR}/${ARCHIVE_NAME}" | cut -f1)"
+DOWNLOADED_SIZE=$(stat -c %s "${TMPDIR}/${BINARY_NAME}" 2>/dev/null || echo "?")
+ok "Downloaded ${DOWNLOADED_SIZE} bytes"
 
-# --- Verify checksum ---
-info "Verifying checksum..."
-if curl -sSf -o "${TMPDIR}/checksums.sha256" "$CHECKSUM_URL" 2>/dev/null; then
-  cd "$TMPDIR"
-  if sha256sum --ignore-missing -c checksums.sha256 2>/dev/null; then
-    ok "Checksum verified"
+# --- Verify checksum (optional) ---
+if command -v sha256sum >/dev/null 2>&1; then
+  info "Verifying checksum..."
+  if EXPECTED=$(curl -sSf "$CHECKSUM_URL" 2>/dev/null | grep -oP "^\K[0-9a-f]+" | head -1); then
+    ACTUAL=$(sha256sum "${TMPDIR}/${BINARY_NAME}" | awk '{print $1}')
+    if [ "$ACTUAL" = "$EXPECTED" ]; then
+      ok "Checksum verified"
+    else
+      warn "Checksum mismatch (expected ${EXPECTED:0:16}... got ${ACTUAL:0:16}...)"
+    fi
   else
-    # Try matching by filename pattern (tarball might not be in checksums)
-    warn "Exact checksum verification skipped (asset name mismatch). Binary will still be verified after extraction."
+    warn "Could not fetch checksums. Skipping."
   fi
-  cd - >/dev/null
+fi
+
+# --- Verify ELF binary (no 'file' dependency) ---
+info "Verifying binary..."
+MAGIC=$(od -A n -t x1 -N 5 "${TMPDIR}/${BINARY_NAME}" 2>/dev/null | tr -d ' ')
+if [ "$MAGIC" = "7f454c4602" ]; then
+  ok "Verified: ELF 64-bit executable"
 else
-  warn "Could not download checksums file. Skipping verification."
-fi
-
-# --- Extract ---
-info "Extracting..."
-cd "$TMPDIR"
-tar xzf "${ARCHIVE_NAME}" 2>/dev/null || fail "Failed to extract archive. Corrupted download?"
-EXTRACTED_DIR="${ARCHIVE_NAME%.tar.gz}"
-
-if [ ! -f "${EXTRACTED_DIR}/${BINARY_NAME}" ]; then
-  fail "Binary not found in archive. Expected: ${EXTRACTED_DIR}/${BINARY_NAME}"
-fi
-ok "Extracted successfully"
-
-# --- Verify ELF binary ---
-if command -v file >/dev/null 2>&1; then
-  if file "${EXTRACTED_DIR}/${BINARY_NAME}" | grep -q "ELF 64-bit"; then
-    ok "Binary verified: ELF 64-bit executable"
-  else
-    fail "Downloaded file is not a valid ELF 64-bit binary!"
-  fi
-elif command -v xxd >/dev/null 2>&1; then
-  # Fallback: check ELF magic bytes (7f 45 4c 46) + 64-bit class (02)
-  MAGIC=$(xxd -l 5 -p "${EXTRACTED_DIR}/${BINARY_NAME}")
-  if [ "$MAGIC" = "7f454c4602" ]; then
-    ok "Binary verified: ELF 64-bit (magic bytes)"
-  else
-    fail "Downloaded file is not a valid ELF 64-bit binary! (magic: $MAGIC)"
-  fi
-elif command -v od >/dev/null 2>&1; then
-  # Fallback: od to check ELF magic
-  MAGIC=$(od -A n -t x1 -N 5 "${EXTRACTED_DIR}/${BINARY_NAME}" | tr -d ' ')
-  if [ "$MAGIC" = "7f454c4602" ]; then
-    ok "Binary verified: ELF 64-bit (magic bytes via od)"
-  else
-    fail "Downloaded file is not a valid ELF 64-bit binary! (magic: $MAGIC)"
-  fi
-else
-  warn "'file' command not found — skipping binary verification"
+  fail "Not a valid ELF 64-bit binary (magic: ${MAGIC:-empty})"
 fi
 
 # --- Install ---
@@ -203,11 +156,11 @@ info "Installing to ${INSTALL_DIR}/${BINARY_NAME}..."
 
 if [ "$NEED_SUDO" -eq 1 ]; then
   sudo mkdir -p "$INSTALL_DIR"
-  sudo cp "${EXTRACTED_DIR}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
+  sudo cp "${TMPDIR}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
   sudo chmod +x "${INSTALL_DIR}/${BINARY_NAME}"
 else
   mkdir -p "$INSTALL_DIR"
-  cp "${EXTRACTED_DIR}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
+  cp "${TMPDIR}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
   chmod +x "${INSTALL_DIR}/${BINARY_NAME}"
 fi
 ok "Installed to ${BOLD}${INSTALL_DIR}/${BINARY_NAME}${NC}"
@@ -225,7 +178,6 @@ ENVEOF
   chmod 600 "$ENV_FILE"
   ok "API key saved to ${ENV_FILE} (chmod 600)"
 else
-  # Create template env file
   info "Creating env template at ${ENV_FILE}"
   cat > "$ENV_FILE" << ENVEOF
 # asm-agent environment
