@@ -258,7 +258,7 @@ worklog_read_context:
     mov     r14, rdi                    ; update tail_start to this position
     sub     r14, r12                    ; r14 = offset from base
 
-    cmp     ecx, MAX_CONTEXT_ENTRIES    ; found enough entries?
+    cmp     ecx, 20                       ; found enough entries? (was MAX_CONTEXT_ENTRIES)
     jge     .scan_done
 
 .scan_next:

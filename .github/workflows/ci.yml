@@ -1,0 +1,77 @@
+# ============================================================================
+# CI — Build, Static Checks, and Live API Integration Test
+# ============================================================================
+name: ASM-AGENT CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  build:
+    name: Build & Verify
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install NASM
+        run: sudo apt-get update && sudo apt-get install -y nasm
+
+      - name: Build
+        run: make clean && make
+
+      - name: Verify binary
+        run: |
+          test -f asm-agent
+          test -s asm-agent
+          file asm-agent | grep -q "ELF 64-bit"
+          echo "Binary OK: $(stat -c %s asm-agent) bytes"
+
+      - name: Check symbols
+        run: |
+          for sym in _start parse_response exec_command build_payload \
+                     call_api call_api_retry messages_init messages_append_tc \
+                     messages_append_tr check_blocked str_len str_find \
+                     str_copy str_escape_json; do
+            if nm asm-agent | grep -q "T $sym"; then
+              echo "  OK: $sym"
+            else
+              echo "  FAIL: $sym missing"
+              exit 1
+            fi
+          done
+
+  integration:
+    name: Live API Integration Test
+    runs-on: ubuntu-22.04
+    needs: build
+    if: ${{ secrets.ASM_AGENT_API_KEY != '' }}
+    env:
+      ASM_AGENT_API_KEY: ${{ secrets.ASM_AGENT_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install NASM
+        run: sudo apt-get update && sudo apt-get install -y nasm
+
+      - name: Build
+        run: make clean && make
+
+      - name: Run live integration test
+        timeout-minutes: 5
+        run: |
+          chmod +x tests/run_tests.sh
+          tests/run_tests.sh
+
+      - name: Upload artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs
+          path: |
+            WORKLOG.md
+            /tmp/.asm_agent_response.json
+            /tmp/.asm_agent_payload.json
+            /tmp/asm_ci_test_*/agent_*.log

@@ -1,8 +1,5 @@
 ; ============================================================================
-; checkpoint.asm — File-based State Persistence
-; ============================================================================
-; Saves/restores orchestration state to checkpoint.json
-; Enables resume after crash or interruption
+; checkpoint.asm — File-based State Persistence (Simplified)
 ; ============================================================================
 
 %include "constants.inc"
@@ -14,7 +11,6 @@
 ; --- External data ---
 extern current_mode
 extern iteration_count
-extern exec_streak
 extern musical_state
 extern task_buf
 extern task_len
@@ -40,18 +36,13 @@ section .rodata
 
 checkpoint_path: db 'checkpoint.json', 0
 
-; JSON fragments
 cp_json_open:     db '{', 10, 0
 cp_json_magic:    db '  "magic": "MAGC",', 10, 0
-cp_json_mode:     db '  "mode": ', 0
-cp_json_sep:      db ',', 10, 0
 cp_json_iter:     db '  "iteration": ', 0
-cp_json_streak:   db '  "exec_streak": ', 0
+cp_json_sep:      db ',', 10, 0
 cp_json_task:     db '  "task": "', 0
-cp_json_task_end: db '",', 10, 0
-cp_json_musical:  db '  "musical_tempo": ', 0
+cp_json_task_end: db '"', 10, 0
 cp_json_close:    db '}', 10, 0
-cp_newline:       db 10, 0
 
 ; ============================================================================
 section .text
@@ -67,7 +58,6 @@ checkpoint_save:
     push    r12
     push    r13
 
-    ; Open file for writing: O_WRONLY | O_CREAT | O_TRUNC
     mov     rax, SYS_OPEN
     lea     rdi, [rel checkpoint_path]
     mov     esi, (O_WRONLY | O_CREAT | O_TRUNC)
@@ -76,27 +66,14 @@ checkpoint_save:
 
     test    rax, rax
     js      .save_done
-    mov     rbx, rax            ; rbx = fd
+    mov     rbx, rax
 
-    ; Build JSON in temp_buf
     lea     r12, [rel temp_buf]
-    mov     r13, r12            ; r13 = base for length calc
+    mov     r13, r12
 
-    ; Write opening brace
     lea     rsi, [rel cp_json_open]
     call    cp_copy_to_buf
-
-    ; Write magic
     lea     rsi, [rel cp_json_magic]
-    call    cp_copy_to_buf
-
-    ; Write mode
-    lea     rsi, [rel cp_json_mode]
-    call    cp_copy_to_buf
-    movzx   eax, byte [current_mode]
-    mov     esi, eax
-    call    cp_write_int_to_buf
-    lea     rsi, [rel cp_json_sep]
     call    cp_copy_to_buf
 
     ; Write iteration
@@ -106,25 +83,6 @@ checkpoint_save:
     mov     esi, eax
     call    cp_write_int_to_buf
     lea     rsi, [rel cp_json_sep]
-    call    cp_copy_to_buf
-
-    ; Write exec streak
-    lea     rsi, [rel cp_json_streak]
-    call    cp_copy_to_buf
-    mov     eax, [rel exec_streak]
-    mov     esi, eax
-    call    cp_write_int_to_buf
-    lea     rsi, [rel cp_json_sep]
-    call    cp_copy_to_buf
-
-    ; Write musical tempo
-    lea     rsi, [rel cp_json_musical]
-    call    cp_copy_to_buf
-    lea     rax, [rel musical_state]
-    movzx   eax, byte [rax + MS_TEMPO]
-    mov     esi, eax
-    call    cp_write_int_to_buf
-    lea     rsi, [rel cp_newline]
     call    cp_copy_to_buf
 
     ; Write task (truncated to 32 chars)
@@ -138,7 +96,7 @@ checkpoint_save:
     movzx   eax, byte [rsi]
     test    al, al
     jz      .cp_task_done
-    cmp     al, '"'             ; escape quotes
+    cmp     al, '"'
     je      .cp_task_quote
     mov     [r12], al
     inc     r12
@@ -157,22 +115,18 @@ checkpoint_save:
     lea     rsi, [rel cp_json_task_end]
     call    cp_copy_to_buf
 
-    ; Write closing brace
     lea     rsi, [rel cp_json_close]
     call    cp_copy_to_buf
 
-    ; Null terminate
     mov     byte [r12], 0
 
-    ; Calculate length and write to file
     mov     rdx, r12
-    sub     rdx, r13            ; rdx = length
+    sub     rdx, r13
     mov     rax, SYS_WRITE
-    mov     rdi, rbx            ; fd
+    mov     rdi, rbx
     lea     rsi, [rel temp_buf]
     syscall
 
-    ; Close file
     mov     rax, SYS_CLOSE
     mov     rdi, rbx
     syscall
@@ -193,7 +147,6 @@ checkpoint_restore:
     push    rbx
     push    r12
 
-    ; Check if file exists
     mov     rax, SYS_OPEN
     lea     rdi, [rel checkpoint_path]
     mov     esi, O_RDONLY
@@ -202,9 +155,8 @@ checkpoint_restore:
 
     test    rax, rax
     js      .restore_fail
-    mov     rbx, rax            ; rbx = fd
+    mov     rbx, rax
 
-    ; Read file into temp_buf
     mov     rax, SYS_READ
     mov     rdi, rbx
     lea     rsi, [rel temp_buf]
@@ -213,23 +165,10 @@ checkpoint_restore:
 
     test    rax, rax
     js      .restore_close_fail
-    mov     r12, rax            ; r12 = bytes read
+    mov     r12, rax
 
-    ; Null terminate
     lea     rax, [rel temp_buf]
     mov     byte [rax + r12], 0
-
-    ; Parse JSON — find "mode": N
-    lea     rdi, [rel temp_buf]
-    lea     rsi, [rel cp_json_mode]
-    call    cp_find_and_extract_int
-    cmp     rax, -1
-    je      .restore_close_fail
-    cmp     eax, MODE_COUNT
-    jb      .mode_ok
-    mov     eax, MODE_RESEARCHER
-.mode_ok:
-    mov     [current_mode], al
 
     ; Find "iteration": N
     lea     rdi, [rel temp_buf]
@@ -238,26 +177,6 @@ checkpoint_restore:
     cmp     rax, -1
     je      .restore_close_fail
     mov     [iteration_count], eax
-
-    ; Find "exec_streak": N
-    lea     rdi, [rel temp_buf]
-    lea     rsi, [rel cp_json_streak]
-    call    cp_find_and_extract_int
-    cmp     rax, -1
-    je      .restore_close_fail
-    mov     [exec_streak], eax
-
-    ; Find "musical_tempo": N
-    lea     rdi, [rel temp_buf]
-    lea     rsi, [rel cp_json_musical]
-    call    cp_find_and_extract_int
-    cmp     rax, -1
-    je      .restore_close_fail
-    cmp     eax, tempo_interval_count
-    jb      .tempo_ok
-    mov     eax, TEMPO_MODERATO
-.tempo_ok:
-    mov     byte [rel musical_state + MS_TEMPO], al
 
     ; Find "task": "..."
     lea     rdi, [rel temp_buf]
@@ -269,15 +188,13 @@ checkpoint_restore:
     je      .restore_close_fail
     mov     [task_len], rax
 
-    ; Close file
     mov     rax, SYS_CLOSE
     mov     rdi, rbx
     syscall
 
-    ; Delete checkpoint after successful restore
     call    checkpoint_delete
 
-    mov     rax, 1              ; success
+    mov     rax, 1
     jmp     .restore_done
 
 .restore_close_fail:
@@ -286,7 +203,7 @@ checkpoint_restore:
     syscall
 
 .restore_fail:
-    xor     eax, eax            ; no checkpoint
+    xor     eax, eax
 
 .restore_done:
     pop     r12
@@ -295,21 +212,20 @@ checkpoint_restore:
     ret
 
 ; ============================================================================
-; checkpoint_exists — Check if checkpoint file exists
+; checkpoint_exists
 ; ============================================================================
 checkpoint_exists:
     mov     rax, SYS_ACCESS
     lea     rdi, [rel checkpoint_path]
-    mov     esi, 0              ; F_OK = check existence
+    xor     esi, esi
     syscall
-
     test    rax, rax
     setz    al
     movzx   eax, al
     ret
 
 ; ============================================================================
-; checkpoint_delete — Remove checkpoint file
+; checkpoint_delete
 ; ============================================================================
 checkpoint_delete:
     mov     rax, SYS_UNLINK
@@ -317,11 +233,8 @@ checkpoint_delete:
     syscall
     ret
 
-; ============================================================================
-; cp_copy_to_buf — Copy null-terminated string to r12, advance r12
-; ============================================================================
-; Input: rsi = source string
-; Clobbers: rax, rsi, r12
+; --- Helpers ---
+
 cp_copy_to_buf:
 .cp_copy_loop:
     lodsb
@@ -333,18 +246,12 @@ cp_copy_to_buf:
 .cp_copy_done:
     ret
 
-; ============================================================================
-; cp_write_int_to_buf — Write integer as decimal string to r12
-; ============================================================================
-; Input: esi = integer value
-; Clobbers: rax, rdi, rsi, r12
 cp_write_int_to_buf:
     push    rbp
     mov     rbp, rsp
     sub     rsp, 16
     mov     rdi, rsp
     call    uint_to_str
-    ; Copy result to buffer
     mov     rsi, rsp
 .cp_int_loop:
     lodsb
@@ -358,33 +265,25 @@ cp_write_int_to_buf:
     pop     rbp
     ret
 
-; ============================================================================
-; cp_find_and_extract_int — Find JSON key and extract integer value
-; ============================================================================
-; Input: rdi = JSON string, rsi = key to find (may include colon/trailing space)
-; Returns: rax = extracted integer, or -1 on error
 cp_find_and_extract_int:
     push    rbx
     push    r12
     push    r13
 
-    mov     rbx, rdi            ; rbx = JSON string
-    mov     r12, rsi            ; r12 = key
+    mov     rbx, rdi
+    mov     r12, rsi
 
-    ; Find key in JSON
     mov     rdi, rbx
     mov     rsi, r12
     call    str_find
     test    rax, rax
     jz      .cpe_failed
 
-    ; Skip past key
     mov     r13, rax
     mov     rdi, r12
     call    str_len
-    add     r13, rax            ; r13 = past key
+    add     r13, rax
 
-    ; Skip optional whitespace/colon after the matched key, then parse digits.
 .cpe_digit:
     movzx   eax, byte [r13]
     test    al, al
@@ -412,8 +311,7 @@ cp_find_and_extract_int:
     jmp     .cpe_digit
 
 .cpe_parse:
-    ; Parse decimal number
-    xor     eax, eax            ; result = 0
+    xor     eax, eax
 .cpe_parse_loop:
     movzx   ecx, byte [r13]
     cmp     cl, '0'
@@ -439,12 +337,6 @@ cp_find_and_extract_int:
     pop     rbx
     ret
 
-; ============================================================================
-; cp_find_and_extract_string — Find JSON key and extract quoted string value
-; ============================================================================
-; Input: rdi = JSON string, rsi = key to find, rdx = destination buffer,
-;        rcx = destination size including null terminator
-; Returns: rax = bytes copied, or -1 on error
 cp_find_and_extract_string:
     push    rbx
     push    r12
@@ -462,12 +354,11 @@ cp_find_and_extract_string:
     test    rax, rax
     jz      .cps_failed
 
-    ; Save str_find result before str_len clobbers rax
     push    rax
     mov     rdi, r12
-    call    str_len             ; rax = key length
-    pop     rdi                  ; rdi = match pointer from str_find
-    add     rdi, rax             ; rdi = match_ptr + key_length
+    call    str_len
+    pop     rdi
+    add     rdi, rax
     mov     r12, rdi
 
 .cps_seek_quote:

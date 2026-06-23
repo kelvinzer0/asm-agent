@@ -63,6 +63,9 @@ retry_msg_end:    db ')', 10, 0
 
 api_error_prefix:  db '{"error"', 0
 
+; Debug dump path
+response_dump_path: db '/tmp/.asm_agent_response.json', 0
+
 section .bss
 auth_header_buf:    resb 4096
 
@@ -322,6 +325,31 @@ call_api:
     test    eax, eax
     jnz     .error_return           ; curl exited non-zero → error
 
+    ; ------------------------------------------------------------------
+    ; Debug: dump raw response to /tmp/.asm_agent_response.json
+    ; ------------------------------------------------------------------
+    lea     rdi, [rel response_dump_path]
+    mov     esi, (O_WRONLY | O_CREAT | O_TRUNC)
+    mov     edx, FILE_MODE
+    mov     eax, SYS_OPEN
+    syscall
+    test    rax, rax
+    js      .dump_skip             ; open failed, skip dump
+    mov     r12, rax                ; r12 = dump fd
+
+    ; write(fd, response_buf, response_len)
+    mov     rdi, r12
+    lea     rsi, [rel response_buf]
+    mov     rdx, [rel response_len]
+    mov     rax, SYS_WRITE
+    syscall
+
+    ; close dump fd
+    mov     rdi, r12
+    mov     eax, SYS_CLOSE
+    syscall
+.dump_skip:
+
     ; Success — return response length
     mov     rax, r14
     jmp     .cleanup
@@ -445,7 +473,6 @@ call_api_retry:
     push    r13
     push    r14
     push    r15
-    sub     rsp, 16                  ; local space for uint_to_str
 
     xor     r14d, r14d              ; r14 = retry counter (0-based)
     xor     r15d, r15d              ; r15 = backoff seconds (1, 2, 4, ...)
@@ -471,70 +498,71 @@ call_api_retry:
 .backoff_ok:
 
     ; Log retry message to worklog: "API call failed, retrying in Ns (attempt X/3)"
-    lea     rdi, [rsp]
+    ; Use temp_buf (8KB) instead of stack to avoid overflow
+    lea     rdi, [rel temp_buf]
     lea     rsi, [rel retry_msg_prefix]
-    call    .copy_str_to_rsp
+    call    .copy_str_to_buf
 
     ; Convert backoff seconds to string
-    mov     rdi, rsp
+    lea     r12, [rel temp_buf]
+    xor     eax, eax
+.ts1_loop:
+    cmp     byte [r12], 0
+    je      .ts1_done
+    inc     r12
+    jmp     .ts1_loop
+.ts1_done:
+    mov     rdi, r12
     mov     esi, r15d
-    push    rbx
-    mov     rbx, rdi
-    sub     rsp, 16
-    mov     rdi, rsp
     call    uint_to_str
-    mov     rdi, rbx
-    mov     rsi, rsp
-    call    .copy_str_to_rsp
-    add     rsp, 16
-    pop     rbx
+    lea     rdi, [rel temp_buf]
+    mov     rsi, r12
+    call    .copy_str_to_buf
 
     ; Append "s (attempt "
-    lea     rdi, [rsp]
+    lea     rdi, [rel temp_buf]
     lea     rsi, [rel retry_msg_suffix]
-    call    .copy_str_to_rsp
+    call    .copy_str_to_buf
 
     ; Append attempt number
-    mov     rdi, rsp
+    lea     r12, [rel temp_buf]
+    xor     eax, eax
+.ts2_loop:
+    cmp     byte [r12], 0
+    je      .ts2_done
+    inc     r12
+    jmp     .ts2_loop
+.ts2_done:
+    mov     rdi, r12
     mov     esi, r14d
-    push    rbx
-    mov     rbx, rdi
-    sub     rsp, 16
-    mov     rdi, rsp
     call    uint_to_str
-    mov     rdi, rbx
-    mov     rsi, rsp
-    call    .copy_str_to_rsp
-    add     rsp, 16
-    pop     rbx
+    lea     rdi, [rel temp_buf]
+    mov     rsi, r12
+    call    .copy_str_to_buf
 
     ; Append "/MAX)"
-    lea     rdi, [rsp]
-    lea     rsi, [rel retry_msg_of]
-    call    .copy_str_to_rsp
-
-    mov     rdi, rsp
-    mov     esi, API_MAX_RETRIES
-    push    rbx
-    mov     rbx, rdi
-    sub     rsp, 16
-    mov     rdi, rsp
-    call    uint_to_str
-    mov     rdi, rbx
-    mov     rsi, rsp
-    call    .copy_str_to_rsp
-    add     rsp, 16
-    pop     rbx
-
-    lea     rdi, [rsp]
-    lea     rsi, [rel retry_msg_end]
-    call    .copy_str_to_rsp
-
-    ; Null-terminate
-    mov     byte [rsp + r12], 0    ; r12 tracks position from .copy_str_to_rsp
     lea     rdi, [rel temp_buf]
-    mov     rsi, rsp
-    call    str_copy
+    lea     rsi, [rel retry_msg_of]
+    call    .copy_str_to_buf
+
+    lea     r12, [rel temp_buf]
+    xor     eax, eax
+.ts3_loop:
+    cmp     byte [r12], 0
+    je      .ts3_done
+    inc     r12
+    jmp     .ts3_loop
+.ts3_done:
+    mov     rdi, r12
+    mov     esi, API_MAX_RETRIES
+    call    uint_to_str
+    lea     rdi, [rel temp_buf]
+    mov     rsi, r12
+    call    .copy_str_to_buf
+
+    lea     rdi, [rel temp_buf]
+    lea     rsi, [rel retry_msg_end]
+    call    .copy_str_to_buf
 
     ; Write to worklog
     lea     rdi, [rel retry_log_label]
@@ -542,8 +570,9 @@ call_api_retry:
     call    worklog_append_entry
 
     ; Sleep for backoff period: r15 seconds
-    ; nanosleep({sec = r15, nsec = 0}, NULL)
-    mov     rdi, rsp               ; use local space for timespec
+    ; nanosleep using stack timespec (safe: only 16 bytes needed)
+    sub     rsp, 16
+    mov     rdi, rsp
     xor     eax, eax
     mov     [rsp], r15d            ; tv_sec
     mov     [rsp + 4], eax         ; tv_sec high dword
@@ -552,11 +581,11 @@ call_api_retry:
     xor     esi, esi               ; NULL (no remainder)
     mov     eax, SYS_NANOSLEEP
     syscall
+    add     rsp, 16
 
     jmp     .retry_loop
 
 .success:
-    add     rsp, 16
     pop     r15
     pop     r14
     pop     r13
@@ -567,7 +596,6 @@ call_api_retry:
 
 .all_failed:
     mov     rax, -1
-    add     rsp, 16
     pop     r15
     pop     r14
     pop     r13
@@ -576,32 +604,29 @@ call_api_retry:
     pop     rbp
     ret
 
-; --- Helper: append string to rsp position, advance r12 ---
-; rdi = destination base (rsp), rsi = source string
-.copy_str_to_rsp:
-    ; r12 holds current write offset into rsp buffer
-    ; On first call, r12 might be 0; let's use a simple approach:
-    ; scan from rdi for null terminator to find current end
+; --- Helper: append string to temp_buf, advance write pointer ---
+; rdi = destination (temp_buf or end of temp_buf), rsi = source string
+.copy_str_to_buf:
     push    rax
     push    rcx
+    ; Find end of destination string
     mov     rcx, rdi
     xor     al, al
-.crs_find_end:
+.csb_find_end:
     cmp     byte [rcx], 0
-    je      .crs_found_end
+    je      .csb_found_end
     inc     rcx
-    jmp     .crs_find_end
-.crs_found_end:
+    jmp     .csb_find_end
+.csb_found_end:
     ; rcx = end of string in rdi buffer
-.crs_copy:
+.csb_copy:
     lodsb
     test    al, al
-    jz      .crs_done
+    jz      .csb_done
     mov     [rcx], al
     inc     rcx
-    jmp     .crs_copy
-.crs_done:
-    mov     r12, rcx              ; save end position for caller
+    jmp     .csb_copy
+.csb_done:
     pop     rcx
     pop     rax
     ret

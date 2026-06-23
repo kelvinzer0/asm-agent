@@ -56,42 +56,32 @@
 
 ; --- Buffer Sizes ---
 %define RESPONSE_BUF_SZ     262144      ; 256KB — API response
-%define COMMAND_BUF_SZ      8192        ; 8KB   — parsed command
-%define PAYLOAD_BUF_SZ      131072      ; 128KB — JSON payload
+%define COMMAND_BUF_SZ      8192        ; 8KB   — parsed command (from tool_call args)
+%define PAYLOAD_BUF_SZ      262144      ; 256KB — JSON payload (increased for conversation history)
 %define WORKLOG_BUF_SZ      65536       ; 64KB  — context window
 %define OUTPUT_BUF_SZ       65536       ; 64KB  — command output
 %define TIMESTAMP_BUF_SZ    64          ; 64B   — ISO timestamp
 %define TASK_BUF_SZ         4096        ; 4KB   — user input task
 %define TEMP_BUF_SZ         8192        ; 8KB   — general purpose temp
 %define INPUT_LINE_SZ       1024        ; 1KB   — single line input
+%define MESSAGES_BUF_SZ     196608      ; 192KB — conversation history JSON
+%define TOOL_CALL_ID_SZ     128         ; 128B  — tool call ID
+%define TOOL_CALL_NAME_SZ   64          ; 64B   — function name
+%define TOOL_CALL_ARGS_SZ   8192        ; 8KB   — function arguments JSON
+%define FINISH_REASON_SZ    32          ; 32B   — finish_reason string
+%define CONTENT_BUF_SZ      8192        ; 8KB   — response content text
 
-; --- Orchestrator Limits ---
+; --- Agent Limits ---
 %define MAX_ITERATIONS      50
 %define API_TIMEOUT_SECS    120
 %define CMD_TIMEOUT_SECS    60
-%define LOOP_DELAY_SECS     2
-%define MAX_CONTEXT_ENTRIES 2
-%define MAX_CONSECUTIVE_EXEC 3
-%define MAX_CONSECUTIVE_THINK 3
-%define MAX_SUCCESSFUL_EXEC 5    ; force DONE after this many successful commands
+%define LOOP_DELAY_SECS     1
 
 ; --- Action Types (returned by parser) ---
-%define ACTION_EXEC         0
-%define ACTION_THINK        1
-%define ACTION_DONE         2
-%define ACTION_ERROR        -1
-
-; --- Agent States ---
-%define STATE_INIT              0
-%define STATE_READ_WORKLOG      1
-%define STATE_BUILD_CONTEXT     2
-%define STATE_BUILD_PAYLOAD     3
-%define STATE_CALL_API          4
-%define STATE_PARSE_RESPONSE    5
-%define STATE_EXEC_CMD          6
-%define STATE_CAPTURE_OUTPUT    7
-%define STATE_LOG               8
-%define STATE_EXIT              9
+%define ACTION_TOOL_CALL    0           ; model returned tool_calls
+%define ACTION_DONE         1           ; task_complete tool called
+%define ACTION_THINK        2           ; model returned content only (finish_reason: stop)
+%define ACTION_ERROR        -1          ; parse failure or API error
 
 ; --- fstat struct offsets (struct stat) ---
 %define STAT_SIZE           48          ; offset of st_size in struct stat

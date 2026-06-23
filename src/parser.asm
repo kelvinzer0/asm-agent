@@ -1,27 +1,20 @@
 ; ============================================================================
-; parser.asm — ASM-AGENT API Response Parser
+; parser.asm — ASM-AGENT API Response Parser (Tool Calls Architecture)
 ; ============================================================================
-; Parses the JSON response from the Chat Completions API to extract the
-; assistant's "content" string, unescape it, and classify the action type.
+; Parses the JSON response from the Chat Completions API.
 ;
-; Input:
-;   response_buf  = raw JSON response from API
-;   response_len  = number of bytes in response_buf
+; Extracts from response_buf:
+;   1. finish_reason → finish_reason_buf
+;   2. tool_calls[0].id → tool_call_id_buf
+;   3. tool_calls[0].function.name → tool_call_name_buf
+;   4. tool_calls[0].function.arguments → tool_call_args_buf
+;   5. content → content_buf
 ;
-; Output (in command_buf):
-;   The text AFTER the "PREFIX:" tag (with leading spaces stripped).
-;   e.g., for "EXEC: ls -la" -> command_buf = "ls -la"
-;
-; Return value (rax):
-;   ACTION_EXEC  (0)  — command_buf has shell command to execute
-;   ACTION_THINK (1)  — command_buf has reasoning text
-;   ACTION_DONE  (2)  — command_buf has completion summary
-;   ACTION_ERROR (-1) — parse failure or API error
-;
-; Register convention:
-;   r12 = write pointer into command_buf during extraction
-;   r13 = read pointer during content scanning
-;   r14 = end boundary (response_buf + response_len)
+; Returns (rax):
+;   ACTION_TOOL_CALL (0)  — model returned tool_calls
+;   ACTION_DONE     (1)  — tool_call name is "task_complete"
+;   ACTION_THINK    (2)  — finish_reason is "stop", no tool_calls
+;   ACTION_ERROR    (-1) — parse failure or API error
 ; ============================================================================
 
 %include "constants.inc"
@@ -31,18 +24,22 @@
 ; ---------------------------------------------------------------------------
 ; External data
 ; ---------------------------------------------------------------------------
-extern response_buf             ; resb RESPONSE_BUF_SZ (262144)
-extern response_len             ; resq 1
-extern command_buf              ; resb COMMAND_BUF_SZ  (8192)
+extern response_buf
+extern response_len
+extern command_buf
+extern finish_reason_buf
+extern content_buf
+extern tool_call_id_buf
+extern tool_call_name_buf
+extern tool_call_args_buf
 
 ; ---------------------------------------------------------------------------
-; External functions (defined in string.asm)
+; External functions
 ; ---------------------------------------------------------------------------
-extern str_find                 ; rdi=haystack, rsi=needle -> rax=ptr or 0
-extern str_starts_with          ; rdi=str, rsi=prefix -> rax=1/0
-extern str_len                  ; rdi=str -> rax=length
-extern str_copy                 ; rdi=dst, rsi=src -> rax=bytes copied
-extern handoff_prefix           ; "HANDOFF:" string from orchestration.inc
+extern str_find
+extern str_starts_with
+extern str_len
+extern str_copy
 
 ; ---------------------------------------------------------------------------
 ; Export
@@ -50,36 +47,33 @@ extern handoff_prefix           ; "HANDOFF:" string from orchestration.inc
 global parse_response
 
 ; ============================================================================
-; Read-only data for search needles and action prefixes
-; ============================================================================
 section .rodata
+; ============================================================================
 
-; JSON field keys to search for
-needle_content: db '"content"', 0
-needle_error:   db '"error"', 0
+; JSON keys to search for
+needle_finish_reason:  db '"finish_reason"', 0
+needle_tool_calls:     db '"tool_calls"', 0
+needle_content:        db '"content"', 0
+needle_error:          db '"error"', 0
+needle_function:       db '"function"', 0
+needle_name:           db '"name"', 0
+needle_arguments:      db '"arguments"', 0
+needle_id:             db '"id"', 0
+
 ; SSE stream markers
 sse_data_prefix:  db 'data: ', 0
 sse_done_marker:  db 'data: [DONE]', 0
 
-; XML tool_call tags
-needle_tool_open:  db '<tool_call>', 0
-needle_tool_close: db '</tool_call>', 0
-
-; Action prefixes (fallback for non-XML responses)
-prefix_exec:    db 'EXEC:', 0
-prefix_think:   db 'THINK:', 0
-prefix_done:    db 'DONE:', 0
+; Tool name for comparison
+tc_name_run_command:    db 'run_command', 0
+tc_name_task_complete:  db 'task_complete', 0
 
 ; ============================================================================
 section .text
 ; ============================================================================
 
 ; ============================================================================
-; parse_response — Parse API JSON, extract content, classify action
-; ============================================================================
-; Returns:
-;   rax = ACTION_EXEC | ACTION_THINK | ACTION_DONE | ACTION_ERROR
-;   command_buf is filled with the payload text (after prefix stripping)
+; parse_response — Parse API JSON, extract tool_calls or content
 ; ============================================================================
 parse_response:
     push    rbp
@@ -90,676 +84,451 @@ parse_response:
     push    r15
     push    rbx
 
+    ; --- Clear output buffers ---
+    lea     rdi, [rel finish_reason_buf]
+    xor     al, al
+    mov     [rdi], al
+    lea     rdi, [rel content_buf]
+    mov     [rdi], al
+    lea     rdi, [rel tool_call_id_buf]
+    mov     [rdi], al
+    lea     rdi, [rel tool_call_name_buf]
+    mov     [rdi], al
+    lea     rdi, [rel tool_call_args_buf]
+    mov     [rdi], al
+
+    ; --- Initialize r14 = end of response_buf (used by all parse loops) ---
+    lea     r14, [rel response_buf]
+    add     r14, [rel response_len]
+
     ; -------------------------------------------------------------------
     ; Step 0: Handle SSE streaming format
-    ; -------------------------------------------------------------------
-    ; If response starts with "data: ", the API returned SSE format even
-    ; though we requested stream:false.  Strip "data: " prefixes line by
-    ; line, remove "data: [DONE]" lines, keep the JSON payload.
     ; -------------------------------------------------------------------
     lea     rdi, [rel response_buf]
     lea     rsi, [rel sse_data_prefix]
     call    str_starts_with
     test    rax, rax
-    jz      .no_strip_done        ; not SSE format — skip
+    jz      .no_sse
 
-    ; --- SSE detected: in-place strip "data: " from each line ---
-    lea     r12, [rel response_buf]      ; r12 = read ptr
-    lea     r13, [rel response_buf]      ; r13 = write ptr
+    ; SSE detected: in-place strip "data: " from each line
+    lea     r12, [rel response_buf]
+    lea     r13, [rel response_buf]
     lea     r14, [rel response_buf]
-    add     r14, [rel response_len]      ; r14 = end of buffer
+    add     r14, [rel response_len]
 
-.sse_line_loop:
+.sse_loop:
     cmp     r12, r14
-    jge     .sse_line_done
+    jge     .sse_done
 
-    ; Check if this line starts with "data: "
     lea     rdi, [rel sse_data_prefix]
     mov     rsi, r12
     call    str_starts_with
     test    rax, rax
-    jz      .sse_copy_line         ; not "data: " — copy as-is
+    jz      .sse_copy_raw
 
-    ; Is it "data: [DONE]" ? — skip entire line
+    ; Check for [DONE]
     lea     rdi, [rel sse_done_marker]
     mov     rsi, r12
     call    str_starts_with
-    jnz     .sse_skip_line          ; yes — skip this line
+    jnz     .sse_skip_line
 
-    ; It is "data: {" — skip 6-byte "data: " prefix, copy rest
+    ; Skip "data: " prefix (6 bytes)
     add     r12, 6
-    jmp     .sse_copy_line
+    jmp     .sse_copy_raw
 
 .sse_skip_line:
-    ; Advance r12 past this line to next newline
-.sse_skip_nl:
     cmp     r12, r14
-    jge     .sse_line_done
+    jge     .sse_done
     movzx   eax, byte [r12]
     inc     r12
-    cmp     al, 10                  ; LF = end of line
-    jne     .sse_skip_nl
-    jmp     .sse_line_loop
+    cmp     al, 10
+    jne     .sse_skip_line
+    jmp     .sse_loop
 
-.sse_copy_line:
-    ; Copy bytes from r12 to r13 until newline or end
-.sse_copy_byte:
+.sse_copy_raw:
     cmp     r12, r14
-    jge     .sse_line_done
+    jge     .sse_done
     movzx   eax, byte [r12]
     inc     r12
     mov     [r13], al
     inc     r13
-    cmp     al, 10                  ; LF = end of line
-    je      .sse_line_loop
-    jmp     .sse_copy_byte
+    cmp     al, 10
+    je      .sse_loop
+    jmp     .sse_copy_raw
 
-.sse_line_done:
-    ; Null-terminate and update response_len
+.sse_done:
     mov     byte [r13], 0
     mov     rax, r13
     lea     rcx, [rel response_buf]
     sub     rax, rcx
     mov     [rel response_len], rax
+    ; Update r14 to new end after SSE strip
+    lea     r14, [rel response_buf]
+    add     r14, rax
 
-.no_strip_done:
+.no_sse:
 
     ; -------------------------------------------------------------------
-    ; Step 1: Find "content" key in response_buf
+    ; Step 1: Check for API error
+    ; -------------------------------------------------------------------
+    lea     rdi, [rel response_buf]
+    lea     rsi, [rel needle_error]
+    call    str_find
+    test    rax, rax
+    jnz     .api_error
+
+    ; -------------------------------------------------------------------
+    ; Step 2: Extract finish_reason
+    ; -------------------------------------------------------------------
+    lea     rdi, [rel response_buf]
+    lea     rsi, [rel needle_finish_reason]
+    call    str_find
+    test    rax, rax
+    jz      .no_finish_reason
+
+    ; Advance past "finish_reason" (15 bytes including quotes)
+    add     rax, 15
+    mov     r13, rax
+
+    ; Skip to colon and value
+.fr_skip:
+    cmp     r13, r14
+    jge     .no_finish_reason
+    movzx   eax, byte [r13]
+    inc     r13
+    cmp     al, '"'
+    jne     .fr_skip
+
+    ; Now r13 points to the first char of the finish_reason value
+    ; Copy until closing quote
+    lea     rdi, [rel finish_reason_buf]
+    mov     r12, rdi
+.fr_copy:
+    cmp     r13, r14
+    jge     .fr_copy_done
+    movzx   eax, byte [r13]
+    inc     r13
+    cmp     al, '"'
+    je      .fr_copy_done
+    mov     [r12], al
+    inc     r12
+    jmp     .fr_copy
+.fr_copy_done:
+    mov     byte [r12], 0
+    jmp     .check_tool_calls
+
+.no_finish_reason:
+    ; Default: assume stop
+    lea     rdi, [rel finish_reason_buf]
+    mov     byte [rdi], 's'
+    mov     byte [rdi+1], 't'
+    mov     byte [rdi+2], 'o'
+    mov     byte [rdi+3], 'p'
+    mov     byte [rdi+4], 0
+
+.check_tool_calls:
+
+    ; -------------------------------------------------------------------
+    ; Step 3: Extract content (always present, may be empty)
     ; -------------------------------------------------------------------
     lea     rdi, [rel response_buf]
     lea     rsi, [rel needle_content]
-    call    str_find            ; rax = pointer to '"content"' or 0
-
+    call    str_find
     test    rax, rax
-    jz      .check_error        ; "content" not found — check for API error
+    jz      .skip_content
 
-    ; -------------------------------------------------------------------
-    ; Step 2: Advance past the '"content"' string (9 bytes)
-    ; -------------------------------------------------------------------
-    add     rax, 9              ; skip past: "content"  (9 chars including quotes)
-    mov     r13, rax            ; r13 = current read position
+    ; Find the FIRST "content" (the one in the message object, not in tools)
+    ; Skip past "content" (9 bytes)
+    add     rax, 9
+    mov     r13, rax
 
-    ; Compute end boundary
-    lea     rax, [rel response_buf]
-    add     rax, [rel response_len]
-    mov     r14, rax            ; r14 = one-past-end of response
-
-    ; -------------------------------------------------------------------
-    ; Step 3: Skip whitespace and the ':' delimiter
-    ; -------------------------------------------------------------------
-.skip_colon_ws:
+    ; Skip whitespace and colon
+.ct_skip:
     cmp     r13, r14
-    jge     .return_error       ; ran off end of buffer
+    jge     .skip_content
     movzx   eax, byte [r13]
+    inc     r13
     cmp     al, ' '
-    je      .advance_skip1
-    cmp     al, 9               ; tab
-    je      .advance_skip1
+    je      .ct_skip
+    cmp     al, 9
+    je      .ct_skip
+    cmp     al, 10
+    je      .ct_skip
     cmp     al, ':'
-    je      .advance_skip1
-    cmp     al, 10              ; newline
-    je      .advance_skip1
-    cmp     al, 13              ; carriage return
-    je      .advance_skip1
-    jmp     .check_value_type   ; found a non-whitespace, non-colon char
-
-.advance_skip1:
-    inc     r13
-    jmp     .skip_colon_ws
-
-    ; -------------------------------------------------------------------
-    ; Step 4: Determine value type
-    ; -------------------------------------------------------------------
-.check_value_type:
-    movzx   eax, byte [r13]
-
-    cmp     al, '"'             ; opening quote of string value
-    je      .extract_string
-
-    cmp     al, 'n'             ; likely "null"
-    je      .return_error
-
-    ; Anything else (number, array, object) is unexpected
-    jmp     .return_error
-
-    ; -------------------------------------------------------------------
-    ; Step 5: Extract and unescape the JSON string value
-    ; -------------------------------------------------------------------
-.extract_string:
-    inc     r13                 ; skip past the opening '"'
-
-    lea     r12, [rel command_buf]  ; r12 = write pointer into command_buf
-    lea     r15, [rel command_buf]
-    add     r15, COMMAND_BUF_SZ
-    sub     r15, 2              ; r15 = safe write limit (leave room for null)
-
-.extract_loop:
-    cmp     r13, r14            ; past end of response?
-    jge     .extract_done       ; truncated string — take what we have
-
-    cmp     r12, r15            ; command_buf about to overflow?
-    jge     .extract_done       ; truncate gracefully
-
-    movzx   eax, byte [r13]
-    inc     r13                 ; advance read pointer
-
-    ; --- Check for backslash escape ---
-    cmp     al, '\'
-    je      .handle_escape
-
-    ; --- Check for closing quote ---
+    je      .ct_skip
     cmp     al, '"'
-    je      .extract_done
+    jne     .skip_content
 
-    ; --- Ordinary character: copy as-is ---
+    ; r13 now past opening quote. Copy until closing quote with unescape.
+    lea     rdi, [rel content_buf]
+    mov     r12, rdi
+.ct_copy:
+    cmp     r13, r14
+    jge     .ct_copy_done
+    movzx   eax, byte [r13]
+    inc     r13
+    cmp     al, '"'
+    je      .ct_copy_done
+    cmp     al, '\'
+    je      .ct_escape
     mov     [r12], al
     inc     r12
-    jmp     .extract_loop
+    jmp     .ct_copy
 
-    ; --- Handle JSON escape sequences ---
-.handle_escape:
-    cmp     r13, r14            ; need at least one more byte
-    jge     .extract_done
-
-    movzx   eax, byte [r13]    ; read the char after backslash
+.ct_escape:
+    cmp     r13, r14
+    jge     .ct_copy_done
+    movzx   eax, byte [r13]
     inc     r13
-
-    cmp     al, '"'
-    je      .esc_quote
-    cmp     al, '\'
-    je      .esc_backslash
     cmp     al, 'n'
-    je      .esc_newline
+    je      .ct_esc_nl
     cmp     al, 't'
-    je      .esc_tab
+    je      .ct_esc_tab
     cmp     al, 'r'
-    je      .esc_cr
-    cmp     al, '/'
-    je      .esc_slash
-    cmp     al, 'b'
-    je      .esc_backspace
-    cmp     al, 'f'
-    je      .esc_formfeed
-
-    ; Unknown escape: write the character as-is (best effort)
+    je      .ct_esc_cr
+    cmp     al, '"'
+    je      .ct_esc_store
+    cmp     al, '\'
+    je      .ct_esc_store
+    ; Unknown escape: store as-is
     mov     [r12], al
     inc     r12
-    jmp     .extract_loop
-
-.esc_quote:
-    mov     byte [r12], '"'
+    jmp     .ct_copy
+.ct_esc_nl:
+    mov     byte [r12], 10
     inc     r12
-    jmp     .extract_loop
-
-.esc_backslash:
-    mov     byte [r12], '\'
+    jmp     .ct_copy
+.ct_esc_tab:
+    mov     byte [r12], 9
     inc     r12
-    jmp     .extract_loop
-
-.esc_newline:
-    mov     byte [r12], 10      ; ASCII LF
+    jmp     .ct_copy
+.ct_esc_cr:
+    mov     byte [r12], 13
     inc     r12
-    jmp     .extract_loop
-
-.esc_tab:
-    mov     byte [r12], 9       ; ASCII TAB
+    jmp     .ct_copy
+.ct_esc_store:
+    mov     [r12], al
     inc     r12
-    jmp     .extract_loop
+    jmp     .ct_copy
 
-.esc_cr:
-    mov     byte [r12], 13      ; ASCII CR
-    inc     r12
-    jmp     .extract_loop
-
-.esc_slash:
-    mov     byte [r12], '/'
-    inc     r12
-    jmp     .extract_loop
-
-.esc_backspace:
-    mov     byte [r12], 8       ; ASCII BS
-    inc     r12
-    jmp     .extract_loop
-
-.esc_formfeed:
-    mov     byte [r12], 12      ; ASCII FF
-    inc     r12
-    jmp     .extract_loop
-
-.extract_done:
-    ; Null-terminate command_buf
+.ct_copy_done:
     mov     byte [r12], 0
 
-    ; -------------------------------------------------------------------
-    ; Step 6: Classify the extracted content
-    ; -------------------------------------------------------------------
-
-    ; --- Check <tool_call> first (strict mode) ---
-    lea     rdi, [rel command_buf]
-    lea     rsi, [rel needle_tool_open]
-    call    str_find
-    test    rax, rax
-    jz      .no_toolcall
-
-    ; Found <tool_call> — extract command from inside
-    mov     r13, rax            ; r13 = pointer to 
-    add     r13, 11             ; skip past <tool_call> (11 bytes)
-
-    ; Skip whitespace/newline after opening tag
-.tool_skip_ws:
-    cmp     r13, r14
-    jge     .no_toolcall
-    movzx   eax, byte [r13]
-    cmp     al, ' '
-    je      .tool_ws_ok
-    cmp     al, 10
-    je      .tool_ws_ok
-    cmp     al, 13
-    je      .tool_ws_ok
-    cmp     al, 9
-    je      .tool_ws_ok
-    jmp     .tool_copy_cmd
-.tool_ws_ok:
-    inc     r13
-    jmp     .tool_skip_ws
-
-.tool_copy_cmd:
-    ; Copy until </tool_call> or newline
-    lea     r12, [rel command_buf]
-.tool_copy_loop:
-    cmp     r13, r14
-    jge     .tool_done
-    movzx   eax, byte [r13]
-
-    ; Check for </tool_call>
-    cmp     al, '<'
-    jne     .tool_store
-    ; Peek ahead for </
-    lea     rcx, [r13 + 1]
-    cmp     rcx, r14
-    jge     .tool_store
-    cmp     byte [rcx], '/'
-    jne     .tool_store
-    ; Check for </tool
-    lea     rcx, [r13 + 2]
-    cmp     rcx, r14
-    jge     .tool_store
-    cmp     byte [rcx], 't'
-    jne     .tool_store
-    jmp     .tool_done
-
-.tool_store:
-    cmp     al, 10
-    je      .tool_done
-    cmp     al, 13
-    je      .tool_done
-    ; Buffer overflow check
-    lea     rcx, [rel command_buf]
-    add     rcx, COMMAND_BUF_SZ - 2
-    cmp     r12, rcx
-    jge     .tool_done
-    mov     [r12], al
-    inc     r12
-    inc     r13
-    jmp     .tool_copy_loop
-
-.tool_done:
-    mov     byte [r12], 0       ; null-terminate
-    mov     eax, ACTION_EXEC    ; tool_call = EXEC
-    jmp     .epilogue
-
-.no_toolcall:
-    ; --- No XML tags: use prefix detection (model natural behavior) ---
-
-    ; --- Check EXEC: (search anywhere in response) ---
-    lea     rdi, [rel command_buf]
-    lea     rsi, [rel prefix_exec]
-    call    str_find
-    test    rax, rax
-    jnz     .found_exec
-
-    ; --- Check THINK: (search anywhere) ---
-    lea     rdi, [rel command_buf]
-    lea     rsi, [rel prefix_think]
-    call    str_find
-    test    rax, rax
-    jnz     .found_think
-
-    ; --- Check DONE: (search anywhere) ---
-    lea     rdi, [rel command_buf]
-    lea     rsi, [rel prefix_done]
-    call    str_find
-    test    rax, rax
-    jnz     .found_done
-
-    ; --- Check HANDOFF: (search anywhere) ---
-    lea     rdi, [rel command_buf]
-    lea     rsi, [rel handoff_prefix]
-    call    str_find
-    test    rax, rax
-    jnz     .found_handoff
-
-    ; --- No recognized prefix: default to THINK ---
-
-.fallback_think:
-    mov     eax, ACTION_THINK
-    jmp     .epilogue
-
-    ; ---------------------------------------------------------------
-    ; Found prefix somewhere in response — extract from that point
-    ; ---------------------------------------------------------------
-.found_exec:
-    ; rax points to "EXEC:" in command_buf
-    ; Extract from "EXEC:" to end of line
-    mov     r13, rax            ; r13 = pointer to "EXEC:"
-    lea     rdi, [rel prefix_exec]
-    call    str_len
-    mov     rbx, rax            ; rbx = prefix length (5)
-    add     r13, rbx            ; r13 = past "EXEC:"
-    mov     r15d, ACTION_EXEC
-    jmp     .extract_from_ptr
-
-.found_think:
-    mov     r13, rax
-    lea     rdi, [rel prefix_think]
-    call    str_len
-    mov     rbx, rax
-    add     r13, rbx
-    mov     r15d, ACTION_THINK
-    jmp     .extract_from_ptr
-
-.found_done:
-    mov     r13, rax
-    lea     rdi, [rel prefix_done]
-    call    str_len
-    mov     rbx, rax
-    add     r13, rbx
-    mov     r15d, ACTION_DONE
-    jmp     .extract_from_ptr
-
-.found_handoff:
-    ; Handoff is handled by orchestration_check_handoff
-    ; For now, treat as THINK
-    mov     eax, ACTION_THINK
-    jmp     .epilogue
-
-    ; ---------------------------------------------------------------
-    ; Extract from pointer: copy until newline or null
-    ; For EXEC: stop at first space that starts explanatory text
-    ; ---------------------------------------------------------------
-.extract_from_ptr:
-    ; Skip whitespace after prefix
-.find_cmd_skip_ws:
-    movzx   eax, byte [r13]
-    cmp     al, ' '
-    je      .find_cmd_ws_ok
-    cmp     al, 9               ; tab
-    je      .find_cmd_ws_ok
-    cmp     al, 10              ; newline
-    je      .find_cmd_ws_ok
-    cmp     al, 13              ; CR
-    je      .find_cmd_ws_ok
-    jmp     .find_cmd_copy
-.find_cmd_ws_ok:
-    inc     r13
-    jmp     .find_cmd_skip_ws
-
-.find_cmd_copy:
-    ; Copy from r13 to command_buf until newline or null
-    lea     r12, [rel command_buf]
-
-.find_cmd_loop:
-    movzx   eax, byte [r13]
-    test    al, al
-    jz      .find_cmd_done
-    cmp     al, 10              ; newline = end
-    je      .find_cmd_done
-    cmp     al, 13              ; CR = end
-    je      .find_cmd_done
-    ; Check buffer overflow
-    lea     rcx, [rel command_buf]
-    add     rcx, COMMAND_BUF_SZ - 2
-    cmp     r12, rcx
-    jge     .find_cmd_done
-    mov     [r12], al
-    inc     r12
-    inc     r13
-    jmp     .find_cmd_loop
-
-.find_cmd_done:
-    mov     byte [r12], 0       ; null terminate
-
-    ; --- Post-process: strip common explanation patterns for EXEC ---
-    cmp     r15d, ACTION_EXEC
-    jne     .find_cmd_return
-
-    ; Find common explanation markers: " to ", " for ", " and "
-    lea     rdi, [rel command_buf]
-    call    str_len
-    test    rax, rax
-    jz      .find_cmd_return
-
-    ; Scan for " to " pattern
-    lea     rdi, [rel command_buf]
-    mov     ecx, eax            ; ecx = string length
-.scan_explain:
-    test    ecx, ecx
-    jz      .find_cmd_return
-    cmp     byte [rdi], ' '
-    jne     .scan_next
-    cmp     byte [rdi + 1], 't'
-    jne     .scan_next
-    cmp     byte [rdi + 2], 'o'
-    jne     .scan_next
-    cmp     byte [rdi + 3], ' '
-    jne     .scan_next
-    ; Found " to " — check if followed by common explanation words
-    movzx   eax, byte [rdi + 4]
-    ; 'v' = verify, 'c' = check/create, 'l' = list, 'r' = run
-    cmp     al, 'v'
-    je      .strip_explanation
-    cmp     al, 'c'
-    je      .strip_explanation
-    cmp     al, 'l'
-    je      .strip_explanation
-    cmp     al, 'r'
-    je      .strip_explanation
-    cmp     al, 's'
-    je      .strip_explanation    ; "to see"
-    cmp     al, 'g'
-    je      .strip_explanation    ; "to get"
-    cmp     al, 'd'
-    je      .strip_explanation    ; "to determine"
-    jmp     .scan_next
-
-.strip_explanation:
-    ; Truncate at this space (make it null terminator)
-    mov     byte [rdi], 0
-    jmp     .find_cmd_return
-
-.scan_next:
-    inc     rdi
-    dec     ecx
-    jmp     .scan_explain
-
-.find_cmd_return:
-    mov     eax, r15d           ; return action type
-    jmp     .epilogue
-
-    ; ---------------------------------------------------------------
-    ; Prefix matched — strip "PREFIX: " from command_buf
-    ; ---------------------------------------------------------------
-.matched_exec:
-    lea     rdi, [rel prefix_exec]
-    call    str_len             ; rax = length of "EXEC:"
-    mov     rbx, rax            ; rbx = prefix length (5 for "EXEC:")
-    mov     r15d, ACTION_EXEC
-    jmp     .strip_prefix
-
-.matched_think:
-    lea     rdi, [rel prefix_think]
-    call    str_len
-    mov     rbx, rax
-    mov     r15d, ACTION_THINK
-    jmp     .strip_prefix
-
-.matched_done:
-    lea     rdi, [rel prefix_done]
-    call    str_len
-    mov     rbx, rax
-    mov     r15d, ACTION_DONE
-    ; fall through to .strip_prefix
-
-    ; ---------------------------------------------------------------
-    ; strip_prefix — Remove prefix and leading spaces, shift content
-    ; to the beginning of command_buf.
-    ;
-    ; rbx = number of prefix bytes to skip (e.g. 5 for "EXEC:")
-    ; r15d = action type to return
-    ; ---------------------------------------------------------------
-.strip_prefix:
-    lea     r13, [rel command_buf]
-    add     r13, rbx            ; r13 = pointer past the prefix (past ':')
-
-    ; Skip any spaces after the colon
-.skip_spaces:
-    movzx   eax, byte [r13]
-    cmp     al, ' '
-    jne     .do_shift
-    inc     r13
-    jmp     .skip_spaces
-
-.do_shift:
-    ; Copy char-by-char until newline or null (not str_copy which goes to null)
-    lea     r12, [rel command_buf]  ; r12 = write pointer
-
-.do_shift_loop:
-    movzx   eax, byte [r13]
-    test    al, al
-    jz      .do_shift_done
-    cmp     al, 10              ; newline = end
-    je      .do_shift_done
-    cmp     al, 13              ; CR = end
-    je      .do_shift_done
-    ; Check buffer overflow
-    lea     rcx, [rel command_buf]
-    add     rcx, COMMAND_BUF_SZ - 2
-    cmp     r12, rcx
-    jge     .do_shift_done
-    mov     [r12], al
-    inc     r12
-    inc     r13
-    jmp     .do_shift_loop
-
-.do_shift_done:
-    mov     byte [r12], 0       ; null-terminate
-
-    ; --- Post-process: strip common explanation patterns for EXEC ---
-    cmp     r15d, ACTION_EXEC
-    jne     .strip_backticks
-
-    lea     rdi, [rel command_buf]
-    call    str_len
-    test    rax, rax
-    jz      .strip_backticks
-
-    lea     rdi, [rel command_buf]
-    mov     ecx, eax
-.scan_explain2:
-    test    ecx, ecx
-    jz      .strip_backticks
-    cmp     byte [rdi], ' '
-    jne     .scan_next2
-    cmp     byte [rdi + 1], 't'
-    jne     .scan_next2
-    cmp     byte [rdi + 2], 'o'
-    jne     .scan_next2
-    cmp     byte [rdi + 3], ' '
-    jne     .scan_next2
-    movzx   eax, byte [rdi + 4]
-    cmp     al, 'v'
-    je      .strip_expl2
-    cmp     al, 'c'
-    je      .strip_expl2
-    cmp     al, 'l'
-    je      .strip_expl2
-    cmp     al, 'r'
-    je      .strip_expl2
-    cmp     al, 's'
-    je      .strip_expl2
-    cmp     al, 'g'
-    je      .strip_expl2
-    cmp     al, 'd'
-    je      .strip_expl2
-    jmp     .scan_next2
-
-.strip_expl2:
-    mov     byte [rdi], 0
-    jmp     .strip_backticks
-
-.scan_next2:
-    inc     rdi
-    dec     ecx
-    jmp     .scan_explain2
-
-.strip_backticks:
-
-    ; --- Strip surrounding backticks if present ---
-    lea     rdi, [rel command_buf]
-    cmp     byte [rdi], '`'
-    jne     .no_backticks
-    call    str_len                 ; rax = length
-    cmp     rax, 2
-    jb      .no_backticks
-    cmp     byte [rdi + rax - 1], '`'
-    jne     .no_backticks
-    mov     byte [rdi + rax - 1], 0  ; remove trailing backtick
-    lea     rsi, [rdi + 1]          ; src = command_buf + 1
-    call    str_copy                ; shift content left
-.no_backticks:
-
-    mov     eax, r15d           ; return the action type
-    jmp     .epilogue
+.skip_content:
 
     ; -------------------------------------------------------------------
-    ; Error paths
+    ; Step 4: Check for tool_calls
     ; -------------------------------------------------------------------
-.check_error:
-    ; "content" was not found. Check if response contains "error"
     lea     rdi, [rel response_buf]
-    lea     rsi, [rel needle_error]
-    call    str_find            ; rax = pointer or 0
+    lea     rsi, [rel needle_tool_calls]
+    call    str_find
+    test    rax, rax
+    jz      .no_tool_calls
 
-    ; Regardless of whether "error" was found, we treat this as an error.
-    ; If "error" key exists, it's an API error.
-    ; If neither "content" nor "error" exists, response is malformed.
+    ; --- Tool calls found! Parse the first one ---
+    ; We need: id, function.name, function.arguments
 
-    ; Copy a useful portion of response_buf into command_buf for debugging
+    ; --- Extract tool call ID ---
+    ; Find "id" after the tool_calls array
+    ; Skip past "tool_calls" to find the first "id" inside
+    add     rax, 13            ; skip "tool_calls" (13 bytes)
+    mov     r13, rax
+
+    ; Find "id" within the tool_calls section
+    lea     rdi, [rel needle_id]
+    mov     rsi, r13
+    call    str_find
+    test    rax, rax
+    jz      .parse_error
+
+    ; Skip past "id" (4 bytes) + colon + quote
+    add     rax, 4
+    mov     r13, rax
+    ; Skip to opening quote of value
+.id_skip:
+    cmp     byte [r13], '"'
+    je      .id_found
+    inc     r13
+    cmp     r13, r14
+    jge     .parse_error
+    jmp     .id_skip
+
+.id_found:
+    inc     r13            ; skip opening quote
+    lea     rdi, [rel tool_call_id_buf]
+    mov     r12, rdi
+.id_copy:
+    cmp     r13, r14
+    jge     .id_copy_done
+    movzx   eax, byte [r13]
+    inc     r13
+    cmp     al, '"'
+    je      .id_copy_done
+    mov     [r12], al
+    inc     r12
+    jmp     .id_copy
+.id_copy_done:
+    mov     byte [r12], 0
+
+    ; --- Extract function name ---
+    ; Find "name" after the function object
+    lea     rdi, [rel needle_name]
+    mov     rsi, r13        ; search from current position
+    call    str_find
+    test    rax, rax
+    jz      .parse_error
+
+    add     rax, 6          ; skip "name" (6 bytes including quotes)
+    mov     r13, rax
+    ; Skip to opening quote
+.name_skip:
+    cmp     byte [r13], '"'
+    je      .name_found
+    inc     r13
+    cmp     r13, r14
+    jge     .parse_error
+    jmp     .name_skip
+
+.name_found:
+    inc     r13
+    lea     rdi, [rel tool_call_name_buf]
+    mov     r12, rdi
+.name_copy:
+    cmp     r13, r14
+    jge     .name_copy_done
+    movzx   eax, byte [r13]
+    inc     r13
+    cmp     al, '"'
+    je      .name_copy_done
+    mov     [r12], al
+    inc     r12
+    jmp     .name_copy
+.name_copy_done:
+    mov     byte [r12], 0
+
+    ; --- Extract function arguments ---
+    lea     rdi, [rel needle_arguments]
+    mov     rsi, r13
+    call    str_find
+    test    rax, rax
+    jz      .parse_error
+
+    add     rax, 12         ; skip "arguments" (12 bytes including quotes)
+    mov     r13, rax
+    ; Skip to opening quote
+.args_skip:
+    cmp     byte [r13], '"'
+    je      .args_found
+    inc     r13
+    cmp     r13, r14
+    jge     .parse_error
+    jmp     .args_skip
+
+.args_found:
+    inc     r13
+    lea     rdi, [rel tool_call_args_buf]
+    mov     r12, rdi
+.args_copy:
+    cmp     r13, r14
+    jge     .args_copy_done
+    movzx   eax, byte [r13]
+    inc     r13
+    cmp     al, '"'
+    je      .args_copy_done
+    ; Handle JSON escape sequences within the arguments string
+    cmp     al, '\'
+    je      .args_escape
+    mov     [r12], al
+    inc     r12
+    jmp     .args_copy
+
+.args_escape:
+    cmp     r13, r14
+    jge     .args_copy_done
+    movzx   eax, byte [r13]
+    inc     r13
+    cmp     al, '"'
+    je      .args_esc_quote
+    cmp     al, '\'
+    je      .args_esc_bs
+    cmp     al, 'n'
+    je      .args_esc_nl
+    cmp     al, 't'
+    je      .args_esc_tab
+    cmp     al, 'r'
+    je      .args_esc_cr
+    ; Unknown escape: store the char
+    mov     [r12], al
+    inc     r12
+    jmp     .args_copy
+.args_esc_quote:
+    mov     byte [r12], '"'
+    inc     r12
+    jmp     .args_copy
+.args_esc_bs:
+    mov     byte [r12], '\'
+    inc     r12
+    jmp     .args_copy
+.args_esc_nl:
+    mov     byte [r12], 10
+    inc     r12
+    jmp     .args_copy
+.args_esc_tab:
+    mov     byte [r12], 9
+    inc     r12
+    jmp     .args_copy
+.args_esc_cr:
+    mov     byte [r12], 13
+    inc     r12
+    jmp     .args_copy
+
+.args_copy_done:
+    mov     byte [r12], 0
+
+    ; --- Determine action type based on function name ---
+    lea     rdi, [rel tool_call_name_buf]
+    lea     rsi, [rel tc_name_task_complete]
+    call    str_starts_with
+    test    rax, rax
+    jnz     .is_done
+
+    mov     eax, ACTION_TOOL_CALL
+    jmp     .epilogue
+
+.is_done:
+    mov     eax, ACTION_DONE
+    jmp     .epilogue
+
+.no_tool_calls:
+    ; --- No tool_calls: finish_reason should be "stop" ---
+    ; This is a THINK or final response
+    ; The content is already in content_buf
+    mov     eax, ACTION_THINK
+    jmp     .epilogue
+
+.api_error:
+    ; Copy response to command_buf for error display
     lea     rdi, [rel command_buf]
     lea     rsi, [rel response_buf]
     ; Copy up to COMMAND_BUF_SZ - 1 bytes
-    xor     rcx, rcx            ; byte counter
-.copy_error_msg:
-    cmp     rcx, COMMAND_BUF_SZ - 1
-    jge     .error_msg_done
+    xor     ecx, ecx
+.copy_err:
+    cmp     ecx, COMMAND_BUF_SZ - 1
+    jge     .err_done
     movzx   eax, byte [rsi + rcx]
     test    al, al
-    jz      .error_msg_done
+    jz      .err_done
     mov     [rdi + rcx], al
     inc     rcx
-    jmp     .copy_error_msg
+    jmp     .copy_err
+.err_done:
+    mov     byte [rdi + rcx], 0
+    mov     eax, ACTION_ERROR
+    jmp     .epilogue
 
-.error_msg_done:
-    mov     byte [rdi + rcx], 0     ; null-terminate
-    jmp     .return_error
-
-.return_error:
+.parse_error:
     mov     eax, ACTION_ERROR
 
-    ; -------------------------------------------------------------------
-    ; Epilogue — restore registers and return
-    ; -------------------------------------------------------------------
 .epilogue:
     pop     rbx
     pop     r15
