@@ -1,5 +1,9 @@
 # ASM-AGENT
 
+[![Latest Release](https://img.shields.io/github/v/release/kelvinzer0/asm-agent?style=flat-square)](https://github.com/kelvinzer0/asm-agent/releases/latest)
+[![Release CI](https://img.shields.io/github/actions/workflow/status/kelvinzer0/asm-agent/release.yml?style=flat-square)](https://github.com/kelvinzer0/asm-agent/actions)
+[![Size](https://img.shields.io/github/size/kelvinzer0/asm-agent/asm-agent?style=flat-square&label=binary)](https://github.com/kelvinzer0/asm-agent/releases/latest)
+
 Autonomous AI coding agent written entirely in **x86-64 NASM assembly**. No libc, no runtime dependencies — a single static ELF64 binary that calls an LLM API and executes shell commands in a tool-call loop.
 
 ## Features
@@ -28,7 +32,7 @@ That's it. The installer will:
 ### Install a Specific Version
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/kelvinzer0/asm-agent/main/install.sh | bash -s -- --version v0.1.0
+curl -sSL https://raw.githubusercontent.com/kelvinzer0/asm-agent/main/install.sh | bash -s -- --version v0.1.1
 ```
 
 ### Custom Install Prefix
@@ -89,8 +93,8 @@ API endpoint, model, and system prompt are compiled into `include/config.inc`.
 Tags trigger automatic builds via GitHub Actions:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 This builds the binary on Ubuntu, creates a GitHub Release with:
