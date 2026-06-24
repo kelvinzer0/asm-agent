@@ -1,3 +1,6 @@
 *.o
 asm-agent
 nasm
+TTY.md
+WORKLOG.md
+CHECKPOINT.md
