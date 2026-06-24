@@ -56,17 +56,22 @@ gh_read_comment    db ' # github_read', 0
 ; Reads /tmp/.asm_gh.json for {"query":"...","type":"code|repositories|issues"}
 ; Calls GitHub Search API, formats results for LLM consumption.
 gh_search_script:
-    db 'import json,urllib.request,sys', 10
+    db 'import json,urllib.request,sys,os', 10
     db 'try:', 10
     db '  a=json.loads(open("/tmp/.asm_gh.json").read())', 10
+    db '  if not a:print("Error: no args",file=sys.stderr);sys.exit(1)', 10
     db '  q=a.get("query","").replace(" ","+")', 10
+    db '  if not q:print("Error: no query",file=sys.stderr);sys.exit(1)', 10
     db '  t=a.get("type","code")', 10
     db '  u="https://api.github.com/search/"+t+"?q="+q+"&per_page=5"', 10
-    db '  r=urllib.request.Request(u,headers={"Accept":"application/vnd.github.v3+json","User-Agent":"asm-agent"})', 10
+    db '  h={"Accept":"application/vnd.github.v3+json","User-Agent":"asm-agent"}', 10
+    db '  tk=os.environ.get("GITHUB_TOKEN","")', 10
+    db '  if tk:h["Authorization"]="Bearer "+tk', 10
+    db '  r=urllib.request.Request(u,headers=h)', 10
     db '  resp=urllib.request.urlopen(r,timeout=30)', 10
     db '  data=json.loads(resp.read().decode())', 10
     db '  out=[]', 10
-    db '  if "items" in data:', 10
+    db '  if data and "items" in data:', 10
     db '    for item in data["items"][:5]:', 10
     db '      if t=="code":', 10
     db '        out.append(item["repository"]["full_name"]+" | "+item["path"]+" | score:"+str(item.get("score",0)))', 10
@@ -75,7 +80,7 @@ gh_search_script:
     db '      elif t=="issues":', 10
     db '        out.append(item["html_url"]+" | "+item["title"]+" | state:"+item["state"])', 10
     db '  print("\\n".join(out))', 10
-    db '  if data.get("total_count",0)>5:', 10
+    db '  if data and data.get("total_count",0)>5:', 10
     db '    print("... and %d more results" % (data["total_count"]-5))', 10
     db 'except Exception as e:', 10
     db '  print("GitHub API Error: %s" % e, file=sys.stderr)', 10
@@ -85,13 +90,18 @@ gh_search_script:
 ; Reads /tmp/.asm_gh.json for {"owner":"...","repo":"...","path":"...","branch":"..."}
 ; Fetches raw file content from GitHub.
 gh_read_script:
-    db 'import json,urllib.request,sys', 10
+    db 'import json,urllib.request,sys,os', 10
     db 'try:', 10
     db '  a=json.loads(open("/tmp/.asm_gh.json").read())', 10
-    db '  o=a["owner"];rp=a["repo"];p=a["path"]', 10
+    db '  if not a:print("Error: no args",file=sys.stderr);sys.exit(1)', 10
+    db '  o=a.get("owner");rp=a.get("repo");p=a.get("path")', 10
+    db '  if not o or not rp or not p:print("Error: missing owner/repo/path",file=sys.stderr);sys.exit(1)', 10
     db '  b=a.get("branch","main")', 10
     db '  u="https://raw.githubusercontent.com/"+o+"/"+rp+"/"+b+"/"+p', 10
-    db '  r=urllib.request.Request(u,headers={"User-Agent":"asm-agent"})', 10
+    db '  h={"User-Agent":"asm-agent"}', 10
+    db '  tk=os.environ.get("GITHUB_TOKEN","")', 10
+    db '  if tk:h["Authorization"]="Bearer "+tk', 10
+    db '  r=urllib.request.Request(u,headers=h)', 10
     db '  resp=urllib.request.urlopen(r,timeout=30)', 10
     db '  content=resp.read().decode()', 10
     db '  print(content[:8000])', 10
