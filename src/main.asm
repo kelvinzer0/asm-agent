@@ -71,6 +71,11 @@ extern checkpoint_restore
 extern checkpoint_exists
 extern current_mode
 
+; --- TTY Session Persistence externs ---
+extern tty_init
+extern tty_update
+extern tty_close
+
 ; --- Global entry point ---
 global _start
 
@@ -355,6 +360,9 @@ _start:
     lea     rsi, [task_buf]
     call    worklog_append_entry
 
+    ; Initialize TTY.md session file
+    call    tty_init
+
     ; Read worklog context
     call    worklog_read_context
 
@@ -492,6 +500,12 @@ _start:
     lea     rsi, [output_buf]
     call    worklog_append_entry
 
+    ; Update TTY.md with EXEC result
+    mov     edi, 1           ; type = 1 (EXEC)
+    lea     rsi, [command_buf]
+    mov     edx, r12d        ; exit code
+    call    tty_update
+
     ; --- Append assistant message to conversation ---
     call    messages_append_tc
 
@@ -530,6 +544,11 @@ _start:
     lea     rsi, [command_buf]
     call    worklog_append_entry
 
+    ; Close TTY.md session
+    xor     edi, edi        ; type = 0 (DONE)
+    lea     rsi, [command_buf]
+    call    tty_close
+
     PRINT   STDOUT, tui_complete
     jmp     .exit_clean
 
@@ -546,6 +565,11 @@ _start:
     lea     rdi, [wl_label_thought]
     lea     rsi, [content_buf]
     call    worklog_append_entry
+
+    ; Update TTY.md with THINK content
+    xor     edi, edi        ; type = 0 (THINK)
+    lea     rsi, [content_buf]
+    call    tty_update
 
     ; If content mentions completion or task is done, exit
     ; Otherwise, loop back (model might just be thinking out loud)
