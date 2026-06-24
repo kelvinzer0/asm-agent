@@ -10,7 +10,7 @@ Autonomous AI coding agent written entirely in **x86-64 NASM assembly**. No libc
 
 - Pure x86-64 assembly — ~6,900 lines of NASM
 - Zero dependencies (statically linked, no libc)
-- Tool-call agentic loop: `run_command` + `task_complete`
+- Tool-call agentic loop: `run_command` + `task_complete` + `github_search` + `github_read`
 - SSE streaming response parsing
 - JSON payload construction entirely in assembly
 - Built-in worklog with ANSI UI
@@ -78,13 +78,36 @@ make          # release build (stripped)
 make debug    # debug build (DWARF symbols)
 ```
 
-## Configuration
+## Environment Variables
 
-The binary reads these environment variables:
-
-| Variable | Description | Default |
+| Variable | Required | Description |
 |---|---|---|
-| `ASM_AGENT_API_KEY` | API key for the LLM service | Falls back to `OPENAI_API_KEY` |
+| `ASM_AGENT_API_KEY` | Yes | OpenAI-compatible API key for the LLM backend |
+| `GITHUB_TOKEN` | No | GitHub Personal Access Token (PAT) for `github_search` and `github_read` tools. Without this, GitHub API calls are unauthenticated (60 req/hour limit). With a PAT: 5,000 req/hour. |
+
+The agent also respects `OPENAI_API_KEY` as a fallback if `ASM_AGENT_API_KEY` is not set.
+
+### Generating a GitHub PAT
+
+1. Go to **Settings → Developer settings → Personal access tokens → Tokens (classic)**
+2. Click **Generate new token (classic)**
+3. Select scopes: `public_repo` (for public repos) or `repo` (for private repos)
+4. Copy the token (starts with `ghp_`)
+5. Export it:
+   ```bash
+   export GITHUB_TOKEN=ghp_your_token_here
+   ```
+
+## Tools
+
+| Tool | Description |
+|---|---|
+| `run_command` | Execute a shell command |
+| `task_complete` | Signal task completion |
+| `github_search` | Search GitHub for code, repositories, or issues (top 5 results) |
+| `github_read` | Read a file from any GitHub repository (up to 8KB) |
+
+## Configuration
 
 API endpoint, model, and system prompt are compiled into `include/config.inc`.
 
