@@ -76,6 +76,10 @@ extern tty_init
 extern tty_update
 extern tty_close
 
+; --- GitHub Tools externs ---
+extern build_gh_search_cmd
+extern build_gh_read_cmd
+
 ; --- Global entry point ---
 global _start
 
@@ -191,6 +195,8 @@ wl_label_thought db 'THOUGHT', 0
 ; String for extracting command from JSON args
 args_command_key:  db '"command"', 0
 args_summary_key:  db '"summary"', 0
+tc_name_gh_search: db 'github_search', 0
+tc_name_gh_read:   db 'github_read', 0
 
 ; Delay timespec
 section .data
@@ -447,9 +453,33 @@ _start:
     PRINT   STDOUT, newline
 .tc_no_reasoning:
 
+    ; --- Dispatch based on tool name ---
+    lea     rdi, [rel tool_call_name_buf]
+    lea     rsi, [rel tc_name_gh_search]
+    call    str_starts_with
+    test    rax, rax
+    jnz     .tc_github_search
+
+    lea     rdi, [rel tool_call_name_buf]
+    lea     rsi, [rel tc_name_gh_read]
+    call    str_starts_with
+    test    rax, rax
+    jnz     .tc_github_read
+
+    ; --- Default: run_command ---
     ; Extract command from tool_call_args_buf (JSON: {"command":"..."})
     call    extract_cmd_args
-    ; command_buf now has the shell command
+    jmp     .tc_after_dispatch
+
+.tc_github_search:
+    call    build_gh_search_cmd
+    jmp     .tc_after_dispatch
+
+.tc_github_read:
+    call    build_gh_read_cmd
+
+.tc_after_dispatch:
+    ; command_buf now has the command to execute
 
     ; Display command
     PRINT   STDOUT, tui_tool_args_pre

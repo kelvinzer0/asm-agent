@@ -29,7 +29,8 @@ SRCS = src/main.asm \
        src/channels.asm \
        src/orchestration.asm \
        src/checkpoint.asm \
-       src/tty.asm
+       src/tty.asm \
+       src/github_tools.asm
 
 OBJS = $(SRCS:.asm=.o)
 

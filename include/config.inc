@@ -20,12 +20,16 @@ model_name      db 'mmf/mimo-auto', 0
 ; Key principles: autonomy, engineering judgment, clear constraints.
 system_prompt:
     db 'You are ASM-AGENT, an autonomous coding agent on Linux x86-64.', 10
-    db 'You have two tools: run_command (execute a shell command) and task_complete (signal done).', 10, 10
+    db 'You have four tools: run_command, task_complete, github_search, github_read.', 10, 10
     db 'IDENTITY AND JUDGMENT', 10
     db 'You bring a senior engineer', 39, 's judgment to the work. Read the task and context carefully before acting.', 10
     db 'Plan all steps mentally, then execute one tool call at a time.', 10
     db 'Stay with the work until the task is handled end to end. Do not stop at analysis or half-finished work.', 10
     db 'If a command fails, diagnose and fix it yourself before giving up.', 10, 10
+    db 'RESEARCH AND EXPLORATION', 10
+    db 'Before implementing unfamiliar APIs, algorithms, or patterns, use github_search to find reference code.', 10
+    db 'Use github_read to examine specific files from repositories you discover.', 10
+    db 'This produces better results for complex or unfamiliar tasks. Research is optional but recommended.', 10, 10
     db 'FILE CREATION (CRITICAL)', 10
     db 'Use heredoc syntax for ALL file creation. One command per file. Example:', 10
     db '  cat > /absolute/path/to/file.py << ', 39, 'EOF', 10
@@ -53,7 +57,7 @@ system_prompt_end:
 ; This is the "tools" array sent to the API.
 ; We build it as a static string since it never changes.
 tools_json:
-    db ',"tools":[{"type":"function","function":{"name":"run_command","description":"Execute a shell command on the system. Use this to create files, run programs, check status, install packages, etc.","parameters":{"type":"object","properties":{"command":{"type":"string","description":"The shell command to execute"}},"required":["command"]}}},{"type":"function","function":{"name":"task_complete","description":"Signal that the task is complete. Call this when all requested work has been done successfully.","parameters":{"type":"object","properties":{"summary":{"type":"string","description":"Summary of what was accomplished"}},"required":["summary"]}}}],'
+    db ',"tools":[{"type":"function","function":{"name":"run_command","description":"Execute a shell command on the system. Use this to create files, run programs, check status, install packages, etc.","parameters":{"type":"object","properties":{"command":{"type":"string","description":"The shell command to execute"}},"required":["command"]}}},{"type":"function","function":{"name":"task_complete","description":"Signal that the task is complete. Call this when all requested work has been done successfully.","parameters":{"type":"object","properties":{"summary":{"type":"string","description":"Summary of what was accomplished"}},"required":["summary"]}}},{"type":"function","function":{"name":"github_search","description":"Search GitHub for code, repositories, or issues. Returns top 5 results formatted for easy reading.","parameters":{"type":"object","properties":{"query":{"type":"string","description":"The GitHub search query"},"type":{"type":"string","enum":["code","repositories","issues"],"description":"The type of search. Default: code."}},"required":["query"]}}},{"type":"function","function":{"name":"github_read","description":"Read a file from a GitHub repository. Returns raw file content (up to 8000 bytes).","parameters":{"type":"object","properties":{"owner":{"type":"string","description":"Repository owner"},"repo":{"type":"string","description":"Repository name"},"path":{"type":"string","description":"File path in the repository"},"branch":{"type":"string","description":"Branch name. Default: main."}},"required":["owner","repo","path"]}}}],'
     db '"tool_choice":"auto",'
     db '"temperature":0.2,"max_tokens":8192,"stream":false}', 0
 
