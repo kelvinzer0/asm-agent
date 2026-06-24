@@ -39,6 +39,7 @@ global worklog_init
 global worklog_read_context
 global worklog_append_raw
 global worklog_append_entry
+global worklog_maybe_archive
 
 
 ; ============================================================================
@@ -49,6 +50,11 @@ section .rodata
 wl_hdr_open     db '>> [', 0           ; entry header open bracket
 wl_hdr_close    db '] ', 0             ; close bracket + space
 wl_newline      db 10, 0               ; single newline
+
+; Archive paths
+memory_dir      db 'memory', 0
+archive_prefix  db 'memory/archive_', 0
+archive_ext     db '.md', 0
 
 
 ; ============================================================================
@@ -275,8 +281,8 @@ worklog_read_context:
     mov     r15, r13                    ; r15 = file_size
     sub     r15, r14                    ; r15 = tail_len = size - tail_start
 
-    ; Clamp to WORKLOG_BUF_SZ - 1
-    mov     rax, WORKLOG_BUF_SZ - 1
+    ; Clamp to WORKLOG_CTX_MAX (12KB) to keep API payload small
+    mov     rax, WORKLOG_CTX_MAX
     cmp     r15, rax
     jbe     .tail_len_ok
     mov     r15, rax                    ; clamp
@@ -493,6 +499,13 @@ worklog_append_entry:
 
     ; Return value from worklog_append_raw is already in rax
 
+    ; ------------------------------------------------------------------
+    ; Check if worklog needs archiving (file too large)
+    ; ------------------------------------------------------------------
+    push    rax                         ; preserve return value
+    call    worklog_maybe_archive
+    pop     rax                         ; restore return value
+
     add     rsp, 8
     pop     r15
     pop     r14
@@ -529,4 +542,311 @@ worklog_append_entry:
     inc     rbx                         ; advance write cursor
     jmp     .copy_loop
 .copy_done:
+    ret
+
+
+; ============================================================================
+; worklog_maybe_archive — Archive old worklog entries if file too large
+; ============================================================================
+; If WORKLOG.md exceeds WORKLOG_FILE_MAX (48KB), this function:
+;   1. Creates "memory/" directory if it doesn't exist
+;   2. Finds next available archive number (memory/archive_001.md, etc.)
+;   3. Moves old content (first half) to the archive file
+;   4. Rewrites WORKLOG.md with only the recent half
+;
+; This keeps the worklog file small so API payloads stay manageable.
+;
+; Args:    none
+; Returns: nothing (best-effort, errors silently ignored)
+; Clobbers: all caller-saved registers
+; ============================================================================
+worklog_maybe_archive:
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    sub     rsp, 144                   ; stat struct
+
+    ; ------------------------------------------------------------------
+    ; 1. fstat WORKLOG.md to get file size
+    ; ------------------------------------------------------------------
+    mov     rax, SYS_OPEN
+    lea     rdi, [rel worklog_path]
+    mov     rsi, O_RDONLY
+    xor     rdx, rdx
+    syscall
+    test    rax, rax
+    js      .archive_done               ; can't open, skip
+    mov     rbx, rax                    ; rbx = fd
+
+    mov     rax, SYS_FSTAT
+    mov     rdi, rbx
+    lea     rsi, [rsp]
+    syscall
+    test    rax, rax
+    js      .archive_close_done
+
+    mov     rax, [rsp + STAT_SIZE]      ; rax = file size
+    cmp     rax, WORKLOG_FILE_MAX
+    jb      .archive_close_done         ; file small enough, skip
+
+    mov     r13, rax                    ; r13 = file_size
+
+    ; ------------------------------------------------------------------
+    ; 2. mmap the file for reading
+    ; ------------------------------------------------------------------
+    mov     rax, SYS_MMAP
+    xor     rdi, rdi
+    mov     rsi, r13
+    mov     rdx, PROT_READ
+    mov     r10, MAP_PRIVATE
+    mov     r8,  rbx
+    xor     r9,  r9
+    syscall
+    cmp     rax, -4096
+    ja      .archive_close_done
+    mov     r12, rax                    ; r12 = mmap base
+
+    ; Close fd (we have mmap)
+    mov     rax, SYS_CLOSE
+    mov     rdi, rbx
+    syscall
+
+    ; ------------------------------------------------------------------
+    ; 3. Create memory/ directory (ignore EEXIST)
+    ; ------------------------------------------------------------------
+    mov     rax, SYS_MKDIR
+    lea     rdi, [rel memory_dir]
+    mov     rsi, FILE_MODE | 0o111       ; 0755
+    syscall                             ; ignore error (may already exist)
+
+    ; ------------------------------------------------------------------
+    ; 4. Find split point: scan for '>> [' from midpoint
+    ;    We keep the last ~24KB and archive the rest
+    ; ------------------------------------------------------------------
+    mov     rax, r13
+    shr     rax, 1                       ; midpoint
+    mov     r14, rax                    ; r14 = split offset (default: midpoint)
+
+    ; Scan forward from midpoint to find next '>> [' entry boundary
+    cmp     r13, 4
+    jb      .archive_no_split
+
+    lea     rdi, [r12 + r14]            ; start scanning from midpoint
+    mov     rcx, r13
+    sub     rcx, r14
+    sub     rcx, 3                      ; need at least 4 bytes
+    jb      .archive_no_split
+
+.find_entry:
+    cmp     rcx, 0
+    je      .archive_no_split
+    cmp     byte [rdi],   0x3E          ; '>'
+    jne     .find_next
+    cmp     byte [rdi+1], 0x3E          ; '>'
+    jne     .find_next
+    cmp     byte [rdi+2], 0x20          ; ' '
+    jne     .find_next
+    cmp     byte [rdi+3], 0x5B          ; '['
+    jne     .find_next
+    ; Found entry boundary!
+    mov     r14, rdi
+    sub     r14, r12                    ; r14 = split offset
+    jmp     .found_split
+
+.find_next:
+    inc     rdi
+    dec     rcx
+    jmp     .find_entry
+
+.found_split:
+.archive_no_split:
+    ; r14 = byte offset where we split
+    ; If r14 == 0, nothing to archive
+    test    r14, r14
+    jz      .archive_unmap
+
+    ; ------------------------------------------------------------------
+    ; 5. Find next archive number (001, 002, ...)
+    ;    We use SYS_ACCESS to check if memory/archive_NNN.md exists
+    ; ------------------------------------------------------------------
+    xor     r15d, r15d                 ; r15d = archive number
+
+.find_num_loop:
+    ; Build path: memory/archive_NNN.md
+    ; Use temp_buf for the path
+    lea     rdi, [rel temp_buf]
+    lea     rsi, [rel archive_prefix]
+    call    .quick_copy
+
+    ; Append 3-digit number
+    mov     eax, r15d
+    ; Convert to 3-digit decimal with zero padding
+    lea     rdi, [rel temp_buf]
+    call    str_len
+    add     rdi, rax                    ; rdi -> end of prefix
+
+    ; Hundreds digit
+    xor     edx, edx
+    mov     ecx, 100
+    div     ecx                         ; eax = quotient, edx = remainder
+    add     al, '0'
+    mov     [rdi], al
+    inc     rdi
+
+    ; Tens digit
+    mov     eax, edx
+    xor     edx, edx
+    mov     ecx, 10
+    div     ecx
+    add     al, '0'
+    mov     [rdi], al
+    inc     rdi
+
+    ; Ones digit
+    add     dl, '0'
+    mov     [rdi], dl
+    inc     rdi
+
+    ; Append .md
+    lea     rsi, [rel archive_ext]
+    call    .quick_copy_at             ; copy from rsi to rdi
+
+    ; Null-terminate
+    mov     byte [rdi], 0
+
+    ; Check if file exists
+    mov     rax, SYS_ACCESS
+    lea     rdi, [rel temp_buf]
+    mov     rsi, 0                      ; F_OK
+    syscall
+    test    rax, rax
+    jz      .num_exists                 ; exists, try next
+    jmp     .num_found
+
+.num_exists:
+    inc     r15d
+    cmp     r15d, 999
+    jb      .find_num_loop
+    jmp     .archive_unmap              ; too many archives, give up
+
+.num_found:
+    ; temp_buf now has the archive path
+
+    ; ------------------------------------------------------------------
+    ; 6. Write old content (0..split_offset) to archive file
+    ; ------------------------------------------------------------------
+    mov     rax, SYS_OPEN
+    lea     rdi, [rel temp_buf]
+    mov     rsi, O_WRONLY | O_CREAT | O_TRUNC
+    mov     rdx, FILE_MODE
+    syscall
+    test    rax, rax
+    js      .archive_unmap
+    mov     rbx, rax                    ; rbx = archive fd
+
+    ; Write split_offset bytes from mmap
+    mov     rax, SYS_WRITE
+    mov     rdi, rbx
+    mov     rsi, r12                    ; mmap base
+    mov     rdx, r14                    ; length = split_offset
+    syscall
+
+    mov     rax, SYS_CLOSE
+    mov     rdi, rbx
+    syscall
+
+    ; ------------------------------------------------------------------
+    ; 7. Rewrite WORKLOG.md with only the recent content (split_offset..end)
+    ; ------------------------------------------------------------------
+    mov     rax, SYS_OPEN
+    lea     rdi, [rel worklog_path]
+    mov     rsi, O_WRONLY | O_CREAT | O_TRUNC
+    mov     rdx, FILE_MODE
+    syscall
+    test    rax, rax
+    js      .archive_unmap
+    mov     rbx, rax
+
+    ; Write header first
+    lea     rdi, [rel worklog_header]
+    call    str_len
+    mov     rdx, rax
+    mov     rax, SYS_WRITE
+    mov     rdi, rbx
+    lea     rsi, [rel worklog_header]
+    syscall
+
+    ; Write remaining content (from split_offset to end)
+    mov     rax, r13
+    sub     rax, r14                    ; remaining bytes
+    test    rax, rax
+    jz      .rewrite_done
+
+    mov     rdx, rax                    ; length
+    mov     rax, SYS_WRITE
+    mov     rdi, rbx
+    lea     rsi, [r12 + r14]           ; mmap + split_offset
+    syscall
+
+.rewrite_done:
+    mov     rax, SYS_CLOSE
+    mov     rdi, rbx
+    syscall
+
+.archive_unmap:
+    ; munmap
+    mov     rax, SYS_MUNMAP
+    mov     rdi, r12
+    mov     rsi, r13
+    syscall
+    jmp     .archive_done
+
+.archive_close_done:
+    mov     rax, SYS_CLOSE
+    mov     rdi, rbx
+    syscall
+
+.archive_done:
+    add     rsp, 144
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    pop     rbp
+    ret
+
+
+; ============================================================================
+; .quick_copy — Copy null-terminated string from rsi to rdi
+; ============================================================================
+.quick_copy:
+    ; rdi = dest, rsi = src
+.qc_loop:
+    lodsb
+    test    al, al
+    jz      .qc_done
+    mov     [rdi], al
+    inc     rdi
+    jmp     .qc_loop
+.qc_done:
+    ret
+
+; ============================================================================
+; .quick_copy_at — Copy null-terminated string, rdi is already at write pos
+; ============================================================================
+.quick_copy_at:
+    ; rdi = dest (write position), rsi = src
+.qca_loop:
+    lodsb
+    test    al, al
+    jz      .qca_done
+    mov     [rdi], al
+    inc     rdi
+    jmp     .qca_loop
+.qca_done:
     ret

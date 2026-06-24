@@ -24,6 +24,8 @@
 %define SYS_GETPID          39
 %define SYS_CLOCK_GETTIME   228
 %define SYS_GETRANDOM       318
+%define SYS_MKDIR            83
+%define SYS_RENAME           82
 
 ; --- File Open Flags ---
 %define O_RDONLY            0
@@ -59,7 +61,8 @@
 %define RESPONSE_BUF_SZ     262144      ; 256KB — API response
 %define COMMAND_BUF_SZ      8192        ; 8KB   — parsed command (from tool_call args)
 %define PAYLOAD_BUF_SZ      262144      ; 256KB — JSON payload (increased for conversation history)
-%define WORKLOG_BUF_SZ      65536       ; 64KB  — context window
+%define WORKLOG_BUF_SZ      65536       ; 64KB  — context window (buffer)
+%define WORKLOG_CTX_MAX     12288       ; 12KB  — max bytes sent to API as context
 %define OUTPUT_BUF_SZ       65536       ; 64KB  — command output
 %define TIMESTAMP_BUF_SZ    64          ; 64B   — ISO timestamp
 %define TASK_BUF_SZ         4096        ; 4KB   — user input task
@@ -74,6 +77,7 @@
 
 ; --- Agent Limits ---
 %define MAX_ITERATIONS      50
+%define WORKLOG_FILE_MAX     49152       ; 48KB  — trim worklog when file exceeds this
 %define API_TIMEOUT_SECS    120
 %define CMD_TIMEOUT_SECS    60
 %define LOOP_DELAY_SECS     1
