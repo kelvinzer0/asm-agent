@@ -33,6 +33,7 @@ extern worklog_init
 extern worklog_read_context
 extern worklog_append_raw
 extern worklog_append_entry
+extern worklog_trim_context
 extern build_payload
 extern parse_response
 extern exec_command
@@ -299,7 +300,7 @@ _start:
     ; getcwd(buf, size)
     lea     rdi, [rel cwd_buf]
     mov     rsi, 1024
-    mov     rax, 79              ; SYS_GETCWD
+    mov     rax, SYS_GETCWD
     syscall
     ; Calculate cwd_len
     lea     rdi, [rel cwd_buf]
@@ -428,6 +429,51 @@ _start:
     ; --- Phase 1: Read WORKLOG context ---
     call    worklog_read_context
     ; rax = context length (in worklog_buf)
+
+    ; --- Phase 1.5: Pre-calculate payload size & trim worklog if needed ---
+    ; Estimate total payload BEFORE building it:
+    ;   est = PAYLOAD_FIXED_OVERHEAD
+    ;       + active_system_prompt_len * JSON_ESCAPE_OVERHEAD
+    ;       + task_len * JSON_ESCAPE_OVERHEAD
+    ;       + worklog_ctx_len * JSON_ESCAPE_OVERHEAD
+    ; If est > PAYLOAD_SAFE_MAX, compute worklog budget and call trim.
+    mov     rax, PAYLOAD_FIXED_OVERHEAD
+    mov     rcx, [rel active_system_prompt_len]
+    shl     rcx, 1                     ; * JSON_ESCAPE_OVERHEAD (2)
+    add     rax, rcx
+    mov     rcx, [rel task_len]
+    shl     rcx, 1
+    add     rax, rcx
+    mov     rcx, [rel worklog_ctx_len]
+    shl     rcx, 1
+    add     rax, rcx                    ; rax = estimated total payload size
+
+    cmp     rax, PAYLOAD_SAFE_MAX
+    jbe     .payload_size_ok           ; estimate fits → skip trim
+
+    ; --- Payload would be too large — compute worklog byte budget ---
+    ; worklog_budget = (PAYLOAD_SAFE_MAX - overhead - sys_prompt*2 - task*2) / 2
+    mov     rdx, PAYLOAD_SAFE_MAX
+    sub     rdx, PAYLOAD_FIXED_OVERHEAD
+    mov     rcx, [rel active_system_prompt_len]
+    shl     rcx, 1
+    sub     rdx, rcx
+    mov     rcx, [rel task_len]
+    shl     rcx, 1
+    sub     rdx, rcx
+    shr     rdx, 1                     ; reverse the escape factor
+
+    ; Ensure minimum worklog budget of 512 bytes (at least partial context)
+    cmp     rdx, 512
+    jae     .budget_ok
+    mov     rdx, 512
+.budget_ok:
+
+    ; Call worklog_trim_context(budget) — drops oldest entries in worklog_buf
+    mov     rdi, rdx
+    call    worklog_trim_context
+
+.payload_size_ok:
 
     ; --- Phase 2: Build JSON payload ---
     PRINT   STDOUT, tui_calling_api

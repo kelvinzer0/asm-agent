@@ -39,6 +39,7 @@ global worklog_init
 global worklog_read_context
 global worklog_append_raw
 global worklog_append_entry
+global worklog_trim_context
 
 
 ; ============================================================================
@@ -495,6 +496,113 @@ worklog_append_entry:
 
     add     rsp, 8
     pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    pop     rbp
+    ret
+
+
+; ============================================================================
+; worklog_trim_context — Trim worklog_buf to fit within a byte budget
+; ============================================================================
+; Drops the oldest entries from worklog_buf by scanning forward for the
+; '>> [' entry boundary pattern and shifting remaining content left.
+; Repeats until worklog_ctx_len <= max_bytes or only one entry remains.
+;
+; Args:    rdi = max_bytes (target budget for worklog context)
+; Returns: none (modifies worklog_buf and worklog_ctx_len in place)
+; Clobbers: rax, rcx, rdi, rsi
+; ============================================================================
+worklog_trim_context:
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+
+    mov     rbx, rdi                    ; rbx = max_bytes budget
+
+.trim_loop:
+    ; Check if current context already fits
+    mov     rax, [rel worklog_ctx_len]
+    cmp     rax, rbx
+    jbe     .trim_done                  ; fits within budget → done
+
+    ; Need to drop the oldest entry.
+    ; Scan forward in worklog_buf for the NEXT '>> [' (0x3E 0x3E 0x20 0x5B)
+    ; starting from byte index 1 (we skip the first entry's header).
+    lea     r12, [rel worklog_buf]      ; r12 = base of worklog_buf
+
+    mov     rax, [rel worklog_ctx_len]
+    cmp     rax, 8                      ; need at least 8 bytes to find next entry
+    jb      .trim_done                  ; too small to trim further
+
+    ; rdi = scan pointer, rcx = bytes remaining to scan
+    lea     rdi, [r12 + 1]             ; start at byte 1
+    mov     rcx, rax
+    sub     rcx, 4                      ; can't match 4-byte pattern in last 3 bytes
+
+.forward_scan:
+    cmp     rcx, 0
+    jle     .trim_no_more               ; no more boundary found → give up
+
+    cmp     byte [rdi],   0x3E          ; '>'
+    jne     .fwd_next
+    cmp     byte [rdi+1], 0x3E          ; '>'
+    jne     .fwd_next
+    cmp     byte [rdi+2], 0x20          ; ' '
+    jne     .fwd_next
+    cmp     byte [rdi+3], 0x5B          ; '['
+    jne     .fwd_next
+
+    ; Found next entry boundary!
+    mov     r14, rdi
+    sub     r14, r12                    ; r14 = byte offset of next entry
+    jmp     .do_shift
+
+.fwd_next:
+    inc     rdi
+    dec     rcx
+    jmp     .forward_scan
+
+.trim_no_more:
+    ; Couldn't find another entry boundary.
+    ; As a last resort, just truncate to max_bytes.
+    mov     rax, rbx
+    cmp     rax, [rel worklog_ctx_len]
+    jae     .trim_done                  ; budget >= current, nothing to do
+    mov     [rel worklog_ctx_len], rax
+    lea     rdi, [r12 + rax]
+    mov     byte [rdi], 0               ; null-terminate
+    jmp     .trim_done
+
+.do_shift:
+    ; Calculate new length: old_length - offset_of_next_entry
+    mov     r13, [rel worklog_ctx_len]
+    sub     r13, r14                    ; r13 = bytes to keep (from next entry onward)
+
+    ; Shift content left: [base + r14 .. base + old_len] → [base .. base + new_len]
+    ; We must use a forward direction, but rep movsb with overlapping regions
+    ; is safe when source (rsi) > dest (rdi), which is true here since r14 > 0.
+    lea     rsi, [r12 + r14]            ; source = base + offset (further in memory)
+    mov     rdi, r12                    ; dest   = base (earlier in memory)
+    mov     rcx, r13                    ; count  = new length
+    rep     movsb
+
+    ; Null-terminate at new length
+    lea     rdi, [r12 + r13]
+    mov     byte [rdi], 0
+
+    ; Update context length
+    mov     [rel worklog_ctx_len], r13
+
+    ; Loop back — check if still too large (may need to drop more entries)
+    jmp     .trim_loop
+
+.trim_done:
     pop     r14
     pop     r13
     pop     r12

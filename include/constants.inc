@@ -20,6 +20,7 @@
 %define SYS_EXIT            60
 %define SYS_WAIT4           61
 %define SYS_UNLINK          87
+%define SYS_GETCWD          79
 %define SYS_CLOCK_GETTIME   228
 %define SYS_GETRANDOM       318
 
@@ -101,6 +102,13 @@
 
 ; --- Clock ---
 %define CLOCK_REALTIME      0
+
+; --- Payload Size Management ---
+%define PAYLOAD_SAFE_MAX       32768      ; 32KB — safe max payload for API call
+%define WORKLOG_CTX_MAX        20480      ; 20KB — max worklog context sent to API
+%define WORKLOG_FILE_MAX       65536      ; 64KB — trigger archive/split when file exceeds this
+%define JSON_ESCAPE_OVERHEAD   2          ; worst-case multiplier for JSON escaping
+%define PAYLOAD_FIXED_OVERHEAD 768        ; fixed JSON structure + model + cwd + separators
 
 ; --- Boolean ---
 %define TRUE                1
