@@ -211,6 +211,21 @@ wl_reward_tmpl_4 db ' iterations.', 0
 max_iter_str     db '50', 0
 max_iter_msg     db 'Max iterations reached.', 10, 0
 
+; Pagination messages
+tui_page_pre    db 10, ESC, '[1m', ESC, '[38;5;220m', '  ', 0xF0, 0x9F, 0x93, 0x84
+                db ' PAGE ', 0              ; 📄 PAGE
+tui_page_of     db '/', 0
+tui_page_post   db ESC, '[0m', 10, 0
+
+wl_page_notice  db '[PAGINATED] Showing page ', 0
+wl_page_of      db ' of ', 0
+wl_page_dot     db '. Total output: ', 0
+wl_page_bytes   db ' bytes. Reply NEXT_PAGE to see more.', 10, 0
+
+wl_page_last    db '[PAGINATED] Last page shown. All output delivered.', 10, 0
+
+wl_label_page   db 'OUTPUT (page)', 0
+
 ; Delay timespec (2 seconds)
 section .data
     delay_ts    dq LOOP_DELAY_SECS, 0    ; tv_sec, tv_nsec
@@ -229,6 +244,7 @@ global last_command_buf, last_cmd_len, exec_streak, think_streak
 global active_system_prompt, active_system_prompt_len
 global successful_exec_count
 global cwd_buf, cwd_len
+global page_buf, page_total_len, page_offset, page_chunk_num, page_active
 
 response_buf    resb RESPONSE_BUF_SZ
 command_buf     resb COMMAND_BUF_SZ
@@ -258,6 +274,13 @@ worklog_ctx_len resq 1
 last_cmd_len    resq 1
 iter_str_buf    resb 16                 ; for uint_to_str of iteration
 exit_str_buf    resb 16                 ; for uint_to_str of exit code
+
+; Pagination state — stores full output when output is too large for one page
+page_buf        resb PAGE_BUF_SZ         ; full output for pagination
+page_total_len  resq 1                  ; total output length
+page_offset     resq 1                  ; next byte offset to send
+page_chunk_num  resq 1                  ; current page number (1-based)
+page_active     resb 1                  ; 1 = pagination in progress
 
 ; ============================================================================
 ; .text — Main program
@@ -529,7 +552,197 @@ _start:
     je      .handle_think
     cmp     eax, ACTION_DONE
     je      .handle_done
+    cmp     eax, ACTION_NEXT_PAGE
+    je      .handle_next_page
     jmp     .handle_parse_error
+
+; ============================================================================
+; Handle NEXT_PAGE action
+; ============================================================================
+; The AI requested the next page of paginated output.
+; Appends the next OUTPUT_PAGE_SIZE chunk from page_buf to the worklog.
+; ============================================================================
+.handle_next_page:
+    ; Check if pagination is actually active
+    cmp     byte [rel page_active], 1
+    jne     .handle_think           ; no active pagination → treat as think
+
+    ; Calculate remaining bytes
+    mov     rax, [rel page_total_len]
+    sub     rax, [rel page_offset]
+    jle     .page_all_done          ; no more data
+
+    ; Determine this chunk size: min(OUTPUT_PAGE_SIZE, remaining)
+    mov     rcx, OUTPUT_PAGE_SIZE
+    cmp     rax, rcx
+    jbe     .page_this_chunk
+    mov     rcx, rax                ; remaining < page size → this is the last chunk
+.page_this_chunk:
+    ; rcx = bytes to copy for this page
+
+    ; --- Build page content in response_buf ---
+    ; Format: "<tool_response id="0">\n[page:N]\n```\n<chunk>\n```\n</tool_response>\n"
+    lea     rdi, [rel response_buf]
+
+    ; "tool_response id="
+    lea     rsi, [rel wl_tool_resp_s]
+    call    .copy_local_str
+
+    ; iteration "0" (placeholder — not a real tool call)
+    mov     byte [rdi], '"'
+    mov     byte [rdi+1], '0'
+    mov     byte [rdi+2], '"'
+    mov     byte [rdi+3], '>'
+    mov     byte [rdi+4], 10
+    add     rdi, 5
+
+    ; "[page:N]\n```\n"
+    mov     byte [rdi], '['
+    mov     byte [rdi+1], 'p'
+    mov     byte [rdi+2], 'a'
+    mov     byte [rdi+3], 'g'
+    mov     byte [rdi+4], 'e'
+    mov     byte [rdi+5], ':'
+    add     rdi, 6
+
+    ; Append page number
+    inc     qword [rel page_chunk_num]
+    ; Use push/pop to save rdi across uint_to_str
+    push    rdi
+    lea     rdi, [rel exit_str_buf]
+    mov     rax, [rel page_chunk_num]
+    call    uint_to_str
+    pop     rdi
+    lea     rsi, [rel exit_str_buf]
+    call    .copy_local_str
+
+    ; "]\n```\n"
+    mov     byte [rdi], ']'
+    mov     byte [rdi+1], 10
+    mov     byte [rdi+2], '`'
+    mov     byte [rdi+3], '`'
+    mov     byte [rdi+4], '`'
+    mov     byte [rdi+5], 10
+    add     rdi, 6
+
+    ; Copy the actual output chunk from page_buf + page_offset
+    lea     rsi, [rel page_buf]
+    add     rsi, [rel page_offset]
+    ; Calculate space remaining in response_buf
+    lea     rax, [rel response_buf]
+    add     rax, RESPONSE_BUF_SZ - 64
+    sub     rax, rdi
+    cmp     rcx, rax
+    jbe     .page_copy_ok
+    mov     rcx, rax                ; clamp to available space
+.page_copy_ok:
+    ; Copy rcx bytes
+    push    rcx                     ; save chunk size
+    rep     movsb
+    pop     rcx
+
+    ; "\n```\n</tool_response>\n"
+    mov     byte [rdi], 10
+    mov     byte [rdi+1], '`'
+    mov     byte [rdi+2], '`'
+    mov     byte [rdi+3], '`'
+    mov     byte [rdi+4], 10
+    add     rdi, 5
+    lea     rsi, [rel wl_tool_resp_e]
+    call    .copy_local_str
+
+    ; Null-terminate
+    mov     byte [rdi], 0
+
+    ; Log to worklog
+    lea     rdi, [wl_label_page]
+    lea     rsi, [rel response_buf]
+    call    worklog_append_entry
+
+    ; Update page_offset
+    add     [rel page_offset], rcx
+
+    ; --- Display page info in TUI ---
+    PRINT   STDOUT, tui_page_pre
+    lea     rdi, [rel exit_str_buf]
+    mov     rax, [rel page_chunk_num]
+    call    uint_to_str
+    PRINT   STDOUT, exit_str_buf
+    PRINT   STDOUT, tui_page_of
+    ; Total pages
+    mov     rax, [rel page_total_len]
+    add     rax, OUTPUT_PAGE_SIZE - 1
+    xor     edx, edx
+    mov     ecx, OUTPUT_PAGE_SIZE
+    div     ecx
+    lea     rdi, [rel exit_str_buf]
+    call    uint_to_str
+    PRINT   STDOUT, exit_str_buf
+    PRINT   STDOUT, tui_page_post
+
+    ; Check if more pages remain
+    mov     rax, [rel page_total_len]
+    cmp     [rel page_offset], rax
+    jge     .page_all_done
+
+    ; More pages — append notice and loop back
+    ; Reuse the notice builder logic (simplified: just append notice to worklog)
+    lea     rdi, [rel temp_buf]
+    mov     rbx, rdi
+    lea     rsi, [rel wl_page_notice]
+    call    .copy_local_str_to_rbx
+    lea     rdi, [rel exit_str_buf]
+    mov     rax, [rel page_chunk_num]
+    call    uint_to_str
+    lea     rsi, [rel exit_str_buf]
+    call    .copy_local_str_to_rbx
+    lea     rsi, [rel wl_page_of]
+    call    .copy_local_str_to_rbx
+    mov     rax, [rel page_total_len]
+    add     rax, OUTPUT_PAGE_SIZE - 1
+    xor     edx, edx
+    mov     ecx, OUTPUT_PAGE_SIZE
+    div     ecx
+    lea     rdi, [rel exit_str_buf]
+    call    uint_to_str
+    lea     rsi, [rel exit_str_buf]
+    call    .copy_local_str_to_rbx
+    lea     rsi, [rel wl_page_dot]
+    call    .copy_local_str_to_rbx
+    lea     rdi, [rel exit_str_buf]
+    mov     rax, [rel page_total_len]
+    call    uint_to_str
+    lea     rsi, [rel exit_str_buf]
+    call    .copy_local_str_to_rbx
+    lea     rsi, [rel wl_page_bytes]
+    call    .copy_local_str_to_rbx
+    mov     byte [rbx], 0
+    lea     rdi, [rel temp_buf]
+    call    str_len
+    lea     rdi, [rel temp_buf]
+    mov     rsi, rax
+    call    worklog_append_raw
+
+    call    delay_loop
+    jmp     .loop_top
+
+.page_all_done:
+    ; No more pages — mark pagination as complete
+    mov     byte [rel page_active], 0
+
+    ; Append "last page" notice to worklog
+    lea     rdi, [wl_label_thought]
+    lea     rsi, [rel wl_page_last]
+    call    worklog_append_entry
+
+    ; Display in TUI
+    PRINT   STDOUT, tui_think_pre
+    PRINT   STDOUT, wl_page_last
+    PRINT   STDOUT, ansi_reset
+    PRINT   STDOUT, newline
+
+    call    delay_loop
+    jmp     .loop_top
 
 ; ============================================================================
 ; Handle THINK action
@@ -840,6 +1053,32 @@ _start:
     PRINT   STDOUT, newline
 
 .skip_output_display:
+    ; --- Pagination check: if output > OUTPUT_PAGE_SIZE, save full output
+    ;     and truncate what gets logged to the first page only ---
+    mov     byte [rel page_active], 0   ; default: no pagination
+
+    mov     rax, [output_len]
+    cmp     rax, OUTPUT_PAGE_SIZE
+    jbe     .no_paginate_output          ; small output — log everything
+
+    ; --- Save full output to page_buf ---
+    lea     rdi, [rel page_buf]
+    lea     rsi, [output_buf]
+    mov     rcx, rax                    ; rcx = output_len
+    cld
+    rep     movsb
+
+    ; Set pagination state
+    mov     [rel page_total_len], rcx   ; total output length
+    mov     rax, OUTPUT_PAGE_SIZE
+    mov     [rel page_offset], rax      ; next read offset = first page size
+    mov     qword [rel page_chunk_num], 1
+    mov     byte [rel page_active], 1   ; pagination active
+
+    ; Truncate output_len so only first page gets wrapped in worklog
+    mov     [output_len], rax
+
+.no_paginate_output:
     ; Build WORKLOG output entry with tool_response wrapping
     ; Format: "tool_response id=<iteration>\n[exit:N]\n<output>\ntool_response"
     lea     rdi, [rel response_buf]
@@ -914,6 +1153,68 @@ _start:
     lea     rdi, [wl_label_output]
     lea     rsi, [rel response_buf]
     call    worklog_append_entry
+
+    ; --- If pagination active, append notice to worklog ---
+    cmp     byte [rel page_active], 1
+    jne     .no_page_notice_append
+
+    ; Build pagination notice in temp_buf:
+    ; "[PAGINATED] Showing page 1 of N. Total output: M bytes. Reply NEXT_PAGE to see more."
+    lea     rdi, [rel temp_buf]
+    mov     rbx, rdi                 ; rbx = write cursor
+
+    ; Copy "[PAGINATED] Showing page "
+    lea     rsi, [rel wl_page_notice]
+    call    .copy_local_str_to_rbx
+
+    ; Append current page number
+    lea     rdi, [rel exit_str_buf]
+    mov     rax, [rel page_chunk_num]
+    call    uint_to_str
+    lea     rsi, [rel exit_str_buf]
+    call    .copy_local_str_to_rbx
+
+    ; Append " of "
+    lea     rsi, [rel wl_page_of]
+    call    .copy_local_str_to_rbx
+
+    ; Calculate total pages: (total + PAGE_SIZE - 1) / PAGE_SIZE
+    mov     rax, [rel page_total_len]
+    add     rax, OUTPUT_PAGE_SIZE - 1
+    xor     edx, edx
+    mov     ecx, OUTPUT_PAGE_SIZE
+    div     ecx                     ; eax = total pages
+    lea     rdi, [rel exit_str_buf]
+    call    uint_to_str
+    lea     rsi, [rel exit_str_buf]
+    call    .copy_local_str_to_rbx
+
+    ; Append ". Total output: "
+    lea     rsi, [rel wl_page_dot]
+    call    .copy_local_str_to_rbx
+
+    ; Append total byte count
+    lea     rdi, [rel exit_str_buf]
+    mov     rax, [rel page_total_len]
+    call    uint_to_str
+    lea     rsi, [rel exit_str_buf]
+    call    .copy_local_str_to_rbx
+
+    ; Append " bytes. Reply NEXT_PAGE to see more.\n"
+    lea     rsi, [rel wl_page_bytes]
+    call    .copy_local_str_to_rbx
+
+    ; Null-terminate
+    mov     byte [rbx], 0
+
+    ; Calculate length and write to worklog
+    lea     rdi, [rel temp_buf]
+    call    str_len                 ; rax = length
+    lea     rdi, [rel temp_buf]
+    mov     rsi, rax
+    call    worklog_append_raw
+
+.no_page_notice_append:
 
     ; --- Musical Orchestration: Track execution result ---
     ; Advance beat
@@ -1066,6 +1367,19 @@ _start:
     stosb
     jmp     .cls_loop
 .cls_done:
+    ret
+
+; --- Helper: copy string to [rbx] (used by pagination notice builder) ---
+; rsi = source, rbx = write cursor (advanced past last byte written)
+.copy_local_str_to_rbx:
+.crbx_loop:
+    lodsb
+    test    al, al
+    jz      .crbx_done
+    mov     [rbx], al
+    inc     rbx
+    jmp     .crbx_loop
+.crbx_done:
     ret
 
 ; ============================================================================

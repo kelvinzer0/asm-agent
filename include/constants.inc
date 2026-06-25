@@ -79,7 +79,11 @@
 %define ACTION_EXEC         0
 %define ACTION_THINK        1
 %define ACTION_DONE         2
+%define ACTION_NEXT_PAGE    3
 %define ACTION_ERROR        -1
+
+; --- Output Pagination ---
+%define OUTPUT_PAGE_SIZE     3072       ; 3KB max output per page in worklog
 
 ; --- Agent States ---
 %define STATE_INIT              0
@@ -105,6 +109,7 @@
 
 ; --- Payload Size Management ---
 %define PAYLOAD_SAFE_MAX       32768      ; 32KB — safe max payload for API call
+%define PAGE_BUF_SZ           65536      ; 64KB — stores full output for pagination
 %define WORKLOG_CTX_MAX        20480      ; 20KB — max worklog context sent to API
 %define WORKLOG_FILE_MAX       65536      ; 64KB — trigger archive/split when file exceeds this
 %define JSON_ESCAPE_OVERHEAD   2          ; worst-case multiplier for JSON escaping

@@ -67,6 +67,7 @@ needle_tool_close: db '</tool_call>', 0
 prefix_exec:    db 'EXEC:', 0
 prefix_think:   db 'THINK:', 0
 prefix_done:    db 'DONE:', 0
+prefix_next_page: db 'NEXT_PAGE:', 0
 
 ; ============================================================================
 section .text
@@ -379,6 +380,13 @@ parse_response:
     test    rax, rax
     jnz     .found_handoff
 
+    ; --- Check NEXT_PAGE: (search anywhere) ---
+    lea     rdi, [rel command_buf]
+    lea     rsi, [rel prefix_next_page]
+    call    str_find
+    test    rax, rax
+    jnz     .found_next_page
+
     ; --- No recognized prefix: default to THINK ---
 
 .fallback_think:
@@ -421,6 +429,11 @@ parse_response:
     ; Handoff is handled by orchestration_check_handoff
     ; For now, treat as THINK
     mov     eax, ACTION_THINK
+    jmp     .epilogue
+
+.found_next_page:
+    ; NEXT_PAGE doesn't need extracted content — just return the action
+    mov     eax, ACTION_NEXT_PAGE
     jmp     .epilogue
 
     ; ---------------------------------------------------------------
