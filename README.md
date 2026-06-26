@@ -94,12 +94,36 @@ wget -qO- https://raw.githubusercontent.com/kelvinzer0/asm-agent/master/install.
 
 ### Environment Variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `ASM_AGENT_API_KEY` | API key for authentication | (none) |
-| `OPENAI_API_KEY` | Fallback API key | (none) |
-| `ASM_AGENT_API_URL` | Override API endpoint URL | `https://router9.warunglakku.com/v1/chat/completions` |
-| `ASM_AGENT_MODEL` | Override model name | `cf/@cf/meta/llama-3.1-8b-instruct-fp8-fast` |
+| Variable | Required | Description | Default |
+|----------|----------|-------------|---------|
+| `ASM_AGENT_API_KEY` | **Yes*** | API key for authentication (checked first) | — |
+| `OPENAI_API_KEY` | **Yes*** | Fallback API key (used if `ASM_AGENT_API_KEY` not set) | — |
+| `ASM_AGENT_API_URL` | No | Override API endpoint URL | *(compiled-in, see config.inc)* |
+| `ASM_AGENT_MODEL` | No | Override model name | *(compiled-in, see config.inc)* |
+
+> *One of the two API key variables is required. Without it, the agent exits immediately with an error.
+>
+> **Note:** `ASM_AGENT_API_URL` and `ASM_AGENT_MODEL` are planned features (shown in error messages) but not yet implemented at runtime. To change the API endpoint or model, edit `include/config.inc` and rebuild:
+> ```bash
+> # In include/config.inc, change:
+> api_url    db 'https://api.openai.com/v1/chat/completions', 0
+> model_name db 'gpt-4o-mini', 0
+> # Then rebuild:
+> make
+> ```
+
+**Quick start with OpenAI:**
+```bash
+export OPENAI_API_KEY="sk-..."
+./asm-agent "List all files in /tmp"
+```
+
+**Quick start with any OpenAI-compatible provider:**
+```bash
+export ASM_AGENT_API_KEY="your-key"
+# Edit include/config.inc to set your provider's URL and model, then:
+make && ./asm-agent "your task"
+```
 
 ### Makefile Targets
 
