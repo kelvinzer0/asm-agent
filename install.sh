@@ -23,14 +23,22 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 # --- Config ---
-VERSION="0.4.1"
 REPO="kelvinzer0/asm-agent"
 PREFIX="${PREFIX:-/usr/local}"
 INSTALL_DIR="$(pwd)"
 INSTALL_TO_SYSTEM=false
 BUILD_FROM_SOURCE=false
-
 VISIBOX_VERSION="0.3.0"
+
+# Auto-detect latest release version
+detect_latest_version() {
+    local api_url="https://api.github.com/repos/${REPO}/releases/latest"
+    VERSION=$(curl -sLf "$api_url" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['tag_name'].lstrip('v'))" 2>/dev/null || echo "")
+    if [ -z "$VERSION" ]; then
+        VERSION="0.4.2"  # fallback
+    fi
+}
+detect_latest_version
 
 # --- Helpers ---
 info()  { echo -e "${CYAN}[INFO]${NC} $*"; }
@@ -68,7 +76,7 @@ done
 
 echo -e "${BOLD}"
 echo "  ╔═══════════════════════════════════════╗"
-echo "  ║       ASM-AGENT Installer v${VERSION}       ║"
+printf "  ║       ASM-AGENT Installer v%-13s║\n" "${VERSION}"
 echo "  ║   x86-64 NASM Autonomous AI Agent    ║"
 echo "  ╚═══════════════════════════════════════╝"
 echo -e "${NC}"
@@ -79,6 +87,7 @@ if [ "$ARCH" != "x86_64" ]; then
     fail "Unsupported architecture: $ARCH. asm-agent requires x86_64."
 fi
 ok "Architecture: x86_64"
+info "Latest release: v${VERSION}"
 
 # --- Verify curl ---
 if ! check_cmd curl; then
