@@ -503,6 +503,23 @@ worklog_append_entry:
     pop     rbp
     ret
 
+; --- .copy_str helper (must be inside worklog_append_entry scope) ---
+.copy_str:
+    ; rdi is the destination (= rbx, our running pointer)
+    ; rsi is the source string
+    ; We copy bytes from [rsi] to [rbx], advancing both
+.copy_loop:
+    cmp     rbx, r15
+    jae     .copy_done
+    lodsb                               ; al = [rsi], rsi++
+    test    al, al                      ; null terminator?
+    jz      .copy_done
+    mov     [rbx], al                   ; store byte
+    inc     rbx                         ; advance write cursor
+    jmp     .copy_loop
+.copy_done:
+    ret
+
 
 ; ============================================================================
 ; worklog_trim_context — Trim worklog_buf to fit within a byte budget
@@ -608,33 +625,4 @@ worklog_trim_context:
     pop     r12
     pop     rbx
     pop     rbp
-    ret
-
-
-; ============================================================================
-; .copy_str — Internal helper: copy null-terminated string
-; ============================================================================
-; Copies bytes from rsi to rdi until null terminator.
-; Updates rbx to point past the last byte written.
-;
-; Args:    rsi = source (null-terminated)
-;          rdi = destination (rbx, the running cursor)
-; Returns: rbx = updated write cursor (past last byte written)
-; Clobbers: al, rsi
-; Note:    This is a local helper, not exported.
-; ============================================================================
-.copy_str:
-    ; rdi is the destination (= rbx, our running pointer)
-    ; rsi is the source string
-    ; We copy bytes from [rsi] to [rbx], advancing both
-.copy_loop:
-    cmp     rbx, r15
-    jae     .copy_done
-    lodsb                               ; al = [rsi], rsi++
-    test    al, al                      ; null terminator?
-    jz      .copy_done
-    mov     [rbx], al                   ; store byte
-    inc     rbx                         ; advance write cursor
-    jmp     .copy_loop
-.copy_done:
     ret
