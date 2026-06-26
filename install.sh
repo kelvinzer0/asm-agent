@@ -212,20 +212,28 @@ install_binary() {
     sudo cp "$CLONE_DIR/asm-agent" "$dest/asm-agent"
     sudo chmod +x "$dest/asm-agent"
 
-    # Copy VisiBox alongside the binary
+    # Install VisiBox to lib dir and create bin/ symlink for asm-agent's relative path
     local vdest="$PREFIX/lib/asm-agent"
+    local vlink="$PREFIX/bin/../lib/asm-agent"
     if [ -f "$CLONE_DIR/bin/visibox" ]; then
-        sudo mkdir -p "$vdest"
-        sudo cp "$CLONE_DIR/bin/visibox" "$vdest/visibox"
-        sudo chmod +x "$vdest/visibox"
-        warn "VisiBox installed to $vdest/visibox"
-        warn "Note: asm-agent expects visibox at ./bin/visibox (relative path)"
-        warn "To use VisiBox, run asm-agent from a directory containing bin/visibox"
+        sudo mkdir -p "$vdest/bin"
+        sudo cp "$CLONE_DIR/bin/visibox" "$vdest/bin/visibox"
+        sudo chmod +x "$vdest/bin/visibox"
+        ok "VisiBox installed to $vdest/bin/visibox"
+        echo ""
+        info "VisiBox setup:"
+        info "  When running from any directory, create a symlink:"
+        info "    mkdir -p bin && ln -sf $vdest/bin/visibox bin/visibox"
+        info "  Or run from the lib directory:"
+        info "    cd $vdest && ./bin/asm-agent  (after copying asm-agent there)"
     fi
 
     ok "Installed: $dest/asm-agent"
     echo ""
-    info "Try: asm-agent \"List all files in /tmp\""
+    info "Quick start:"
+    info "  cd /tmp && mkdir -p bin"
+    info "  ln -sf $vdest/bin/visibox bin/visibox"
+    info "  asm-agent \"List all files in /tmp\""
 }
 
 # --- Main ---
