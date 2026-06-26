@@ -474,9 +474,9 @@ conductor_apply_rhythm:
 
     ; Get current beat position within cycle
     ; Compute: position = beat_counter % cycle_length
-    movzx   rax, dword [rbx + MS_BEAT_COUNTER]  ; rax = beat counter (dividend)
+    mov     eax, dword [rbx + MS_BEAT_COUNTER]  ; eax = beat counter (dividend)
     xor     edx, edx                              ; rdx = 0 (high bits for div)
-    div     r8                                   ; rax = beat/cycle, rdx = beat%cycle = position
+    div     r8d                                   ; eax = beat/cycle, edx = beat%cycle = position
 
     ; Load the multiplier for this position
     ; rhythm_mult_tables[rhythm_idx] gives pointer to qword array
