@@ -2,14 +2,14 @@
 # ============================================================================
 # install.sh — ASM-AGENT Installer
 # ============================================================================
-# Installs build dependencies (NASM, binutils, curl) and builds asm-agent.
-# Supports: Debian/Ubuntu, Fedora/RHEL, Arch, Alpine.
+# Downloads prebuilt binary + VisiBox from GitHub releases.
+# No build tools (NASM, etc.) required.
 #
 # Usage:
 #   curl -sSL https://raw.githubusercontent.com/kelvinzer0/asm-agent/master/install.sh | bash
-#   bash install.sh              # Install deps + build
-#   bash install.sh --build-only # Skip dependency installation
+#   bash install.sh                    # Download prebuilt to ./asm-agent + ./bin/visibox
 #   bash install.sh --prefix=/usr/local  # Install to system path
+#   bash install.sh --build            # Build from source instead (needs NASM)
 # ============================================================================
 
 set -euo pipefail
@@ -23,11 +23,14 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 # --- Config ---
+VERSION="0.4.1"
+REPO="kelvinzer0/asm-agent"
 PREFIX="${PREFIX:-/usr/local}"
-BUILD_ONLY=false
-REPO_URL="https://github.com/kelvinzer0/asm-agent.git"
-CLONE_DIR=""
+INSTALL_DIR="$(pwd)"
 INSTALL_TO_SYSTEM=false
+BUILD_FROM_SOURCE=false
+
+VISIBOX_VERSION="0.3.0"
 
 # --- Helpers ---
 info()  { echo -e "${CYAN}[INFO]${NC} $*"; }
@@ -35,27 +38,26 @@ ok()    { echo -e "${GREEN}[OK]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 fail()  { echo -e "${RED}[FAIL]${NC} $*" >&2; exit 1; }
 
-check_cmd() {
-    command -v "$1" &>/dev/null
-}
+check_cmd() { command -v "$1" &>/dev/null; }
 
 # --- Parse arguments ---
 for arg in "$@"; do
     case "$arg" in
-        --build-only)
-            BUILD_ONLY=true
-            ;;
         --prefix=*)
             PREFIX="${arg#*=}"
             INSTALL_TO_SYSTEM=true
+            ;;
+        --build)
+            BUILD_FROM_SOURCE=true
             ;;
         --help|-h)
             echo "Usage: bash install.sh [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  --build-only         Skip dependency installation, just build"
-            echo "  --prefix=PATH        Install binary to PATH/bin (default: /usr/local)"
-            echo "  -h, --help           Show this help message"
+            echo "  (default)             Download prebuilt binary from GitHub Releases"
+            echo "  --prefix=PATH         Install to PATH/bin/asm-agent (default: /usr/local)"
+            echo "  --build               Build from source (requires NASM, binutils, make)"
+            echo "  -h, --help            Show this help"
             exit 0
             ;;
         *)
@@ -66,187 +68,210 @@ done
 
 echo -e "${BOLD}"
 echo "  ╔═══════════════════════════════════════╗"
-echo "  ║       ASM-AGENT Installer v0.4.0      ║"
+echo "  ║       ASM-AGENT Installer v${VERSION}       ║"
 echo "  ║   x86-64 NASM Autonomous AI Agent    ║"
 echo "  ╚═══════════════════════════════════════╝"
 echo -e "${NC}"
 
-# --- Detect architecture ---
+# --- Verify x86_64 ---
 ARCH=$(uname -m)
 if [ "$ARCH" != "x86_64" ]; then
     fail "Unsupported architecture: $ARCH. asm-agent requires x86_64."
 fi
 ok "Architecture: x86_64"
 
-# --- Detect OS ---
-detect_pkg_manager() {
-    if check_cmd apt-get; then
-        PKG_MANAGER="apt"
-        PKG_INSTALL="apt-get install -y"
-        PKG_UPDATE="apt-get update -qq"
-    elif check_cmd dnf; then
-        PKG_MANAGER="dnf"
-        PKG_INSTALL="dnf install -y"
-        PKG_UPDATE="dnf check-update -q"
-    elif check_cmd pacman; then
-        PKG_MANAGER="pacman"
-        PKG_INSTALL="pacman -S --noconfirm"
-        PKG_UPDATE="pacman -Sy --noconfirm"
-    elif check_cmd apk; then
-        PKG_MANAGER="apk"
-        PKG_INSTALL="apk add"
-        PKG_UPDATE="apk update"
-    else
-        PKG_MANAGER="unknown"
-    fi
-}
+# --- Verify curl ---
+if ! check_cmd curl; then
+    fail "curl is required. Install it first: sudo apt install curl"
+fi
+ok "curl available"
 
-install_deps() {
-    info "Detecting package manager..."
-    detect_pkg_manager
+# ============================================================================
+# Mode 1: Download prebuilt binary (default)
+# ============================================================================
+download_prebuilt() {
+    local url="https://github.com/${REPO}/releases/download/v${VERSION}/asm-agent-x86_64-linux.tar.gz"
+    local tmpdir
+    tmpdir="$(mktemp -d)"
 
-    case "$PKG_MANAGER" in
-        apt)
-            info "Updating package list..."
-            sudo $PKG_UPDATE
-            info "Installing nasm, binutils, curl, make..."
-            sudo $PKG_INSTALL nasm binutils curl make git
-            ;;
-        dnf)
-            info "Installing nasm, binutils, curl, make, git..."
-            sudo $PKG_INSTALL nasm binutils curl make git
-            ;;
-        pacman)
-            info "Installing nasm, binutils, curl, make, git..."
-            sudo $PKG_INSTALL nasm binutils curl make git
-            ;;
-        apk)
-            info "Installing nasm, binutils, curl, make, git..."
-            sudo $PKG_INSTALL nasm binutils curl make git musl-dev
-            ;;
-        *)
-            warn "Could not detect package manager. Please install manually:"
-            warn "  nasm, binutils (ld), curl, make, git"
-            warn ""
-            read -p "Continue anyway? [y/N] " -n 1 -r
-            echo
-            [[ ! $REPLY =~ ^[Yy]$ ]] && exit 1
-            ;;
-    esac
-}
-
-verify_deps() {
-    local missing=()
-
-    for cmd in nasm ld curl make git; do
-        if ! check_cmd "$cmd"; then
-            missing+=("$cmd")
-        fi
-    done
-
-    if [ ${#missing[@]} -gt 0 ]; then
-        fail "Missing dependencies: ${missing[*]}. Run without --build-only to install them."
+    info "Downloading asm-agent v${VERSION} prebuilt binary..."
+    if ! curl -sLf "$url" -o "$tmpdir/asm-agent.tar.gz"; then
+        rm -rf "$tmpdir"
+        fail "Download failed. Check if release v${VERSION} exists at:
+  https://github.com/${REPO}/releases/tag/v${VERSION}
+  Or use --build to compile from source."
     fi
 
-    ok "All dependencies available"
-}
+    info "Extracting..."
+    tar xzf "$tmpdir/asm-agent.tar.gz" -C "$tmpdir"
+    rm -f "$tmpdir/asm-agent.tar.gz"
 
-# --- Clone or use existing repo ---
-setup_repo() {
-    if [ -f "Makefile" ] && [ -d "src" ] && [ -d "include" ]; then
-        ok "Found asm-agent source in current directory"
-        CLONE_DIR="$(pwd)"
-        return
+    # Find the binary (tar may have a subdirectory or not)
+    if [ -f "$tmpdir/asm-agent" ]; then
+        :
+    elif [ -f "$tmpdir/bin/asm-agent" ]; then
+        # flatten
+        mv "$tmpdir/bin/asm-agent" "$tmpdir/asm-agent"
+        mv "$tmpdir/bin/visibox" "$tmpdir/visibox" 2>/dev/null || true
     fi
 
-    info "Cloning asm-agent repository..."
-    CLONE_DIR="$(mktemp -d)"
-    git clone --depth 1 "$REPO_URL" "$CLONE_DIR" || fail "Failed to clone repository"
-    ok "Cloned to $CLONE_DIR"
-}
-
-# --- Build ---
-build_agent() {
-    cd "$CLONE_DIR"
-
-    info "Building asm-agent..."
-    if make; then
-        ok "Build successful"
-    else
-        fail "Build failed. Check the error messages above."
+    if [ ! -f "$tmpdir/asm-agent" ]; then
+        rm -rf "$tmpdir"
+        fail "Binary not found in archive. Archive structure may have changed."
     fi
 
-    # Verify binary
-    if [ -f "./asm-agent" ]; then
-        local size
-        size=$(stat -c %s ./asm-agent 2>/dev/null || stat -f %z ./asm-agent 2>/dev/null || echo "unknown")
-        ok "Binary: ./asm-agent (${size} bytes)"
-    else
-        fail "Binary not found after build"
-    fi
+    chmod +x "$tmpdir/asm-agent"
 
-    # Check VisiBox
-    if [ -f "./bin/visibox" ]; then
+    local size
+    size=$(stat -c %s "$tmpdir/asm-agent" 2>/dev/null || stat -f %z "$tmpdir/asm-agent" 2>/dev/null || echo "?")
+    ok "asm-agent: ${size} bytes"
+
+    # VisiBox
+    if [ -f "$tmpdir/visibox" ]; then
+        chmod +x "$tmpdir/visibox"
         local vsize
-        vsize=$(stat -c %s ./bin/visibox 2>/dev/null || stat -f %z ./bin/visibox 2>/dev/null || echo "unknown")
-        ok "VisiBox: ./bin/visibox (${vsize} bytes)"
+        vsize=$(stat -c %s "$tmpdir/visibox" 2>/dev/null || stat -f %z "$tmpdir/visibox" 2>/dev/null || echo "?")
+        ok "visibox: ${vsize} bytes"
+        HAS_VISIBOX=true
+        VISIBOX_SRC="$tmpdir/visibox"
     else
-        warn "VisiBox not found (commands will use /bin/sh fallback)"
+        warn "VisiBox not in release archive, downloading separately..."
+        download_visibox "$tmpdir"
+        HAS_VISIBOX=$?
+        VISIBOX_SRC="$tmpdir/visibox"
+    fi
+
+    ASM_AGENT_SRC="$tmpdir/asm-agent"
+    TMPDIR="$tmpdir"
+}
+
+download_visibox() {
+    local dest="$1"
+    local vurl="https://github.com/kelvinzer0/visibox/releases/download/v${VISIBOX_VERSION}/visibox-x86_64-linux-gnu.tar.gz"
+
+    info "Downloading VisiBox v${VISIBOX_VERSION}..."
+    if curl -sLf "$vurl" -o "$dest/visibox.tar.gz"; then
+        tar xzf "$dest/visibox.tar.gz" -C "$dest/"
+        rm -f "$dest/visibox.tar.gz"
+        chmod +x "$dest/visibox" 2>/dev/null || true
+        if [ -f "$dest/visibox" ]; then
+            ok "visibox: downloaded"
+            return 0
+        fi
+    fi
+    warn "VisiBox download failed. Agent will use /bin/sh fallback."
+    return 1
+}
+
+# ============================================================================
+# Mode 2: Build from source (--build)
+# ============================================================================
+build_from_source() {
+    info "Mode: build from source"
+    check_cmd git || fail "git required for --build. Install: sudo apt install git"
+    check_cmd make || fail "make required. Install: sudo apt install make"
+    check_cmd nasm || fail "nasm required. Install: sudo apt install nasm"
+    check_cmd ld   || fail "ld (binutils) required. Install: sudo apt install binutils"
+
+    if [ -f "Makefile" ] && [ -d "src" ] && [ -d "include" ]; then
+        ok "Found source in current directory"
+        TMPDIR="$(pwd)"
+    else
+        info "Cloning repository..."
+        TMPDIR="$(mktemp -d)"
+        git clone --depth 1 "https://github.com/${REPO}.git" "$TMPDIR" || fail "git clone failed"
+        ok "Cloned to $TMPDIR"
+        cd "$TMPDIR"
+    fi
+
+    info "Building..."
+    make || fail "Build failed"
+
+    if [ ! -f "$TMPDIR/asm-agent" ]; then
+        fail "Build succeeded but binary not found"
+    fi
+
+    ASM_AGENT_SRC="$TMPDIR/asm-agent"
+
+    local size
+    size=$(stat -c %s "$TMPDIR/asm-agent" 2>/dev/null || stat -f %z "$TMPDIR/asm-agent" 2>/dev/null || echo "?")
+    ok "asm-agent: ${size} bytes (built from source)"
+
+    if [ -f "$TMPDIR/bin/visibox" ]; then
+        HAS_VISIBOX=true
+        VISIBOX_SRC="$TMPDIR/bin/visibox"
+        local vsize
+        vsize=$(stat -c %s "$VISIBOX_SRC" 2>/dev/null || stat -f %z "$VISIBOX_SRC" 2>/dev/null || echo "?")
+        ok "visibox: ${vsize} bytes"
+    else
+        HAS_VISIBOX=false
+        warn "VisiBox not found. Agent will use /bin/sh fallback."
     fi
 }
 
-# --- Install ---
+# ============================================================================
+# Install binary to destination
+# ============================================================================
 install_binary() {
     if [ "$INSTALL_TO_SYSTEM" = false ]; then
+        # Local install: copy to current directory
+        cp "$ASM_AGENT_SRC" "${INSTALL_DIR}/asm-agent"
+        chmod +x "${INSTALL_DIR}/asm-agent"
+        ok "Installed: ${INSTALL_DIR}/asm-agent"
+
+        if [ "$HAS_VISIBOX" = true ] && [ -f "$VISIBOX_SRC" ]; then
+            mkdir -p "${INSTALL_DIR}/bin"
+            cp "$VISIBOX_SRC" "${INSTALL_DIR}/bin/visibox"
+            chmod +x "${INSTALL_DIR}/bin/visibox"
+            ok "Installed: ${INSTALL_DIR}/bin/visibox"
+        fi
+
         echo ""
-        info "Binary is ready at: $CLONE_DIR/asm-agent"
-        info "Run: cd $CLONE_DIR && ./asm-agent"
-        info "Or copy it: cp $CLONE_DIR/asm-agent /usr/local/bin/"
+        info "Run:  ${INSTALL_DIR}/asm-agent \"your task here\""
         return
     fi
 
+    # System install
     local dest="$PREFIX/bin"
-    info "Installing to $dest/..."
-
     sudo mkdir -p "$dest"
-    sudo cp "$CLONE_DIR/asm-agent" "$dest/asm-agent"
+    sudo cp "$ASM_AGENT_SRC" "$dest/asm-agent"
     sudo chmod +x "$dest/asm-agent"
+    ok "Installed: $dest/asm-agent"
 
-    # Install VisiBox to lib dir and create bin/ symlink for asm-agent's relative path
-    local vdest="$PREFIX/lib/asm-agent"
-    local vlink="$PREFIX/bin/../lib/asm-agent"
-    if [ -f "$CLONE_DIR/bin/visibox" ]; then
-        sudo mkdir -p "$vdest/bin"
-        sudo cp "$CLONE_DIR/bin/visibox" "$vdest/bin/visibox"
-        sudo chmod +x "$vdest/bin/visibox"
-        ok "VisiBox installed to $vdest/bin/visibox"
+    if [ "$HAS_VISIBOX" = true ] && [ -f "$VISIBOX_SRC" ]; then
+        local vdest="$PREFIX/lib/asm-agent/bin"
+        sudo mkdir -p "$vdest"
+        sudo cp "$VISIBOX_SRC" "$vdest/visibox"
+        sudo chmod +x "$vdest/visibox"
+        ok "Installed: $vdest/visibox"
+
         echo ""
-        info "VisiBox setup:"
-        info "  When running from any directory, create a symlink:"
-        info "    mkdir -p bin && ln -sf $vdest/bin/visibox bin/visibox"
-        info "  Or run from the lib directory:"
-        info "    cd $vdest && ./bin/asm-agent  (after copying asm-agent there)"
+        info "VisiBox requires ./bin/visibox relative to working directory."
+        info "Create symlink in your working directory:"
+        info "  mkdir -p bin && ln -sf $vdest/visibox bin/visibox"
     fi
 
-    ok "Installed: $dest/asm-agent"
     echo ""
-    info "Quick start:"
-    info "  cd /tmp && mkdir -p bin"
-    info "  ln -sf $vdest/bin/visibox bin/visibox"
-    info "  asm-agent \"List all files in /tmp\""
+    info "Run:  asm-agent \"your task here\""
 }
 
-# --- Main ---
+cleanup() {
+    if [ -n "${TMPDIR:-}" ] && [ -d "$TMPDIR" ] && [[ "$TMPDIR" == /tmp/* ]]; then
+        rm -rf "$TMPDIR"
+    fi
+}
+trap cleanup EXIT
+
+# ============================================================================
+# Main
+# ============================================================================
 main() {
-    if [ "$BUILD_ONLY" = false ]; then
-        install_deps
+    if [ "$BUILD_FROM_SOURCE" = true ]; then
+        build_from_source
     else
-        info "Skipping dependency installation (--build-only)"
+        download_prebuilt
     fi
 
-    verify_deps
-    setup_repo
-    build_agent
     install_binary
 
     echo -e "${BOLD}"

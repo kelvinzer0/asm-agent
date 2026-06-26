@@ -1,5 +1,8 @@
 # ASM-AGENT
 
+[![Release Build](https://github.com/kelvinzer0/asm-agent/actions/workflows/release.yml/badge.svg)](https://github.com/kelvinzer0/asm-agent/actions/workflows/release.yml)
+[![Latest Release](https://img.shields.io/github/v/release/kelvinzer0/asm-agent?color=green&label=release)](https://github.com/kelvinzer0/asm-agent/releases/latest)
+
 **Autonomous AI Agent — written entirely in x86-64 NASM assembly.**
 
 ASM-AGENT is a zero-dependency, statically-linked Linux binary that implements an autonomous AI agent loop compatible with the OpenAI Chat Completions API. It parses structured responses, executes shell commands, maintains a worklog context, and iterates until the task is complete — all in ~60KB of machine code.

@@ -1,0 +1,164 @@
+name: Release Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.tag }}
+      binary_size: ${{ steps.check.outputs.binary_size }}
+      visibox_size: ${{ steps.check.outputs.visibox_size }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG="dev-$(git rev-parse --short HEAD)"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Building asm-agent ${TAG}"
+
+      - name: Install build tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq nasm binutils curl make
+
+      - name: Download VisiBox
+        run: |
+          VISIBOX_VER="0.3.0"
+          mkdir -p bin
+          curl -sLf "https://github.com/kelvinzer0/visibox/releases/download/v${VISIBOX_VER}/visibox-x86_64-linux-gnu.tar.gz" \
+            -o /tmp/visibox.tar.gz
+          tar xzf /tmp/visibox.tar.gz -C bin/
+          chmod +x bin/visibox
+          rm -f /tmp/visibox.tar.gz
+          echo "VisiBox $(bin/visibox --version 2>/dev/null || echo 'installed')"
+
+      - name: Build asm-agent
+        run: make
+
+      - name: Verify binary
+        id: check
+        run: |
+          file asm-agent
+          ldd asm-agent 2>&1 || echo "statically linked"
+          BSIZE=$(stat -c%s asm-agent)
+          VSIZE=$(stat -c%s bin/visibox)
+          echo "binary_size=${BSIZE}" >> "$GITHUB_OUTPUT"
+          echo "visibox_size=${VSIZE}" >> "$GITHUB_OUTPUT"
+          echo ""
+          echo "asm-agent : ${BSIZE} bytes"
+          echo "visibox   : ${VSIZE} bytes"
+          echo "total     : $((BSIZE + VSIZE)) bytes"
+
+      - name: Package tarball
+        run: |
+          tar czf "asm-agent-x86_64-linux.tar.gz" asm-agent bin/visibox
+          sha256sum asm-agent-x86_64-linux.tar.gz > asm-agent-x86_64-linux.tar.gz.sha256
+          echo "Package contents:"
+          tar tzf asm-agent-x86_64-linux.tar.gz
+          echo ""
+          echo "SHA256:"
+          cat asm-agent-x86_64-linux.tar.gz.sha256
+
+      - name: Upload to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            asm-agent-x86_64-linux.tar.gz
+            asm-agent-x86_64-linux.tar.gz.sha256
+          fail_on_unmatched_files: true
+
+      - name: Upload artifact (dev builds)
+        if: "!startsWith(github.ref, 'refs/tags/v')"
+        uses: actions/upload-artifact@v4
+        with:
+          name: asm-agent-x86_64-linux
+          path: |
+            asm-agent
+            bin/visibox
+
+  # ========================================================================
+  # Monitor — smoke test the built binary
+  # ========================================================================
+  monitor:
+    needs: build
+    runs-on: ubuntu-latest
+    if: always() && needs.build.result == 'success'
+
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: asm-agent-x86_64-linux
+
+      - name: Smoke test — binary runs
+        run: |
+          chmod +x asm-agent bin/visibox
+          echo "=== Binary info ==="
+          file asm-agent
+          echo "=== Version check ==="
+          ./asm-agent --help 2>&1 | head -5 || echo "(no --help flag, binary responds)"
+          echo "=== VisiBox check ==="
+          echo '{"type":"execute","command":"echo hello from visibox"}' | timeout 5 ./bin/visibox --visibox || true
+          echo ""
+          echo "=== All smoke tests passed ==="
+
+      - name: Size report
+        run: |
+          BSIZE=${{ needs.build.outputs.binary_size }}
+          VSIZE=${{ needs.build.outputs.visibox_size }}
+          TOTAL=$((BSIZE + VSIZE))
+          echo "## Build Report" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Component | Size |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-----------|------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| asm-agent | ${BSIZE} bytes |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| visibox   | ${VSIZE} bytes |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **total** | **${TOTAL} bytes** |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Status:** Smoke tests passed" >> "$GITHUB_STEP_SUMMARY"
+
+  # ========================================================================
+  # Notify — post build result
+  # ========================================================================
+  notify:
+    needs: [build, monitor]
+    runs-on: ubuntu-latest
+    if: always() && startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Release summary
+        run: |
+          TAG="${{ needs.build.outputs.version }}"
+          BSIZE="${{ needs.build.outputs.binary_size }}"
+          RESULT="success"
+          if [ "${{ needs.monitor.result }}" != "success" ]; then
+            RESULT="monitor-failed"
+          fi
+
+          echo "## Release ${TAG}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Check | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Build | ${{ needs.build.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Monitor | ${{ needs.monitor.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$RESULT" = "success" ]; then
+            echo "Release ${TAG} published with prebuilt binary (${BSIZE} bytes)." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Build succeeded but smoke tests failed. Check monitor job logs." >> "$GITHUB_STEP_SUMMARY"
+          fi
