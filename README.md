@@ -65,13 +65,13 @@ make
 ### One-Line Install
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/kelvinzer0/asm-agent/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/kelvinzer0/asm-agent/master/install.sh | bash
 ```
 
 Or with wget:
 
 ```bash
-wget -qO- https://raw.githubusercontent.com/kelvinzer0/asm-agent/main/install.sh | bash
+wget -qO- https://raw.githubusercontent.com/kelvinzer0/asm-agent/master/install.sh | bash
 ```
 
 ## Usage

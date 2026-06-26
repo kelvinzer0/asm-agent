@@ -6,7 +6,7 @@
 # Supports: Debian/Ubuntu, Fedora/RHEL, Arch, Alpine.
 #
 # Usage:
-#   curl -sSL https://raw.githubusercontent.com/kelvinzer0/asm-agent/main/install.sh | bash
+#   curl -sSL https://raw.githubusercontent.com/kelvinzer0/asm-agent/master/install.sh | bash
 #   bash install.sh              # Install deps + build
 #   bash install.sh --build-only # Skip dependency installation
 #   bash install.sh --prefix=/usr/local  # Install to system path
