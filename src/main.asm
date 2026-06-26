@@ -29,7 +29,6 @@ extern uint_to_str
 extern int_to_str_padded
 extern get_timestamp
 extern setup_signals
-extern use_visibox
 extern worklog_init
 extern worklog_read_context
 extern worklog_append_raw
