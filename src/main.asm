@@ -161,6 +161,7 @@ tui_error_pre db ESC, '[1m', ESC, '[38;5;203m'
 tui_blocked_msg db 'Command blocked by safety filter!', 10, 0
 tui_api_err_msg db 'API call failed or returned error.', 10, 0
 tui_parse_err   db 'Could not parse LLM response.', 10, 0
+parse_err_fatal db 'Too many parse errors (3). API/model may be misconfigured. Check: ASM_AGENT_API_KEY, ASM_AGENT_API_URL, ASM_AGENT_MODEL', 10, 0
 streak_warn_msg db 'WARNING: You have executed the same command ', MAX_CONSECUTIVE_EXEC+'0', ' times in a row. '
                 db 'The command is not achieving new results. '
                 db 'Please analyze the output carefully and either: '
@@ -267,6 +268,7 @@ shutdown_flag   resb 1
 iteration_count resd 1
 exec_streak     resd 1
 think_streak    resd 1
+parse_error_streak resd 1
 successful_exec_count resd 1
 cwd_buf        resb 1024           ; current working directory
 cwd_len        resq 1
@@ -320,6 +322,7 @@ _start:
     mov     byte [shutdown_flag], 0
     mov     dword [iteration_count], 0
     mov     dword [think_streak], 0
+    mov     dword [parse_error_streak], 0
     mov     dword [successful_exec_count], 0
 
     ; Initialize musical orchestration
@@ -966,6 +969,7 @@ _start:
     mov     [rel last_cmd_len], rax
     mov     dword [rel exec_streak], 1
     mov     dword [rel think_streak], 0    ; reset think streak on EXEC
+    mov     dword [rel parse_error_streak], 0  ; reset parse error streak on EXEC
 
 .cmd_streak_ok:
     ; Check if streak exceeds limit
@@ -1443,6 +1447,23 @@ _start:
     PRINT   STDOUT, tui_error_pre
     PRINT   STDOUT, tui_parse_err
     PRINT   STDOUT, ansi_reset
+
+    ; Increment parse error streak
+    inc     dword [rel parse_error_streak]
+    mov     eax, [rel parse_error_streak]
+    cmp     eax, 3
+    jl      .parse_err_continue
+
+    ; 3+ consecutive parse errors — API is broken or model can't follow format
+    PRINT   STDOUT, tui_error_pre
+    PRINT   STDOUT, parse_err_fatal
+    PRINT   STDOUT, ansi_reset
+    PRINT   STDOUT, newline
+    jmp     .exit_clean
+
+.parse_err_continue:
+    ; Reset think streak (this is an error, not a think)
+    mov     dword [rel think_streak], 0
 
     ; Log the raw response as a thought for debugging
     lea     rdi, [wl_label_thought]
