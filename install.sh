@@ -135,14 +135,13 @@ download_prebuilt() {
     size=$(stat -c %s "$tmpdir/asm-agent" 2>/dev/null || stat -f %z "$tmpdir/asm-agent" 2>/dev/null || echo "?")
     ok "asm-agent: ${size} bytes"
 
-    # VisiBox
-    if [ -f "$tmpdir/visibox" ]; then
-        chmod +x "$tmpdir/visibox"
-        local vsize
-        vsize=$(stat -c %s "$tmpdir/visibox" 2>/dev/null || stat -f %z "$tmpdir/visibox" 2>/dev/null || echo "?")
-        ok "visibox: ${vsize} bytes"
+    # VisiBox (in tarball as bin/visibox)
+    if [ -f "$tmpdir/bin/visibox" ]; then
+        VISIBOX_SRC="$tmpdir/bin/visibox"
         HAS_VISIBOX=true
-        VISIBOX_SRC="$tmpdir/visibox"
+        local vsize
+        vsize=$(stat -c %s "$VISIBOX_SRC" 2>/dev/null || stat -f %z "$VISIBOX_SRC" 2>/dev/null || echo "?")
+        ok "visibox: ${vsize} bytes (from release)"
     else
         warn "VisiBox not in release archive, downloading separately..."
         download_visibox "$tmpdir"
