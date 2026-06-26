@@ -176,7 +176,7 @@ instrument_select:
 
 .scan_done:
     mov     byte [rel current_instrument], r13b
-    mov     eax, r13
+    mov     eax, r13d
 
     pop     r14
     pop     r13
