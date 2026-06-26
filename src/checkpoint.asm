@@ -462,12 +462,13 @@ cp_find_and_extract_string:
     test    rax, rax
     jz      .cps_failed
 
+    ; Save str_find result (match pointer) before str_len clobbers rax
+    push    rax
     mov     rdi, r12
-    call    str_len
-    lea     rsi, [rax + 0]      ; keep in rsi as offset helper
-    lea     rax, [rbx]
-    add     rax, rsi
-    mov     r12, rax
+    call    str_len             ; rax = key length
+    pop     rdi                  ; rdi = match pointer (from str_find)
+    add     rdi, rax             ; rdi = match_ptr + key_length (past the key)
+    mov     r12, rdi
 
 .cps_seek_quote:
     movzx   eax, byte [r12]

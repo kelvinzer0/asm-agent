@@ -42,10 +42,19 @@ system_prompt_end:
 
 %define SYSTEM_PROMPT_LEN (system_prompt_end - system_prompt)
 
-; --- curl binary path ---
+; --- Binary paths ---
 curl_path       db '/usr/bin/curl', 0
 shell_path      db '/bin/sh', 0
 sh_flag         db '-c', 0
+visibox_path    db './bin/visibox', 0        ; VisiBox binary (local, bundled with build)
+visibox_flag    db '--visibox', 0             ; Flag to activate VisiBox pipe mode
+
+; --- VisiBox JSON Protocol Templates ---
+; Request template: {"type":"execute","command":"<CMD>"}
+visibox_req_s   db '{"type":"execute","command":"', 0
+visibox_req_e   db '"}', 0
+visibox_req_s_len equ visibox_req_e - visibox_req_s   ; 30 bytes (prefix only)
+visibox_req_e_len equ $ - visibox_req_e               ; 3 bytes (suffix only)
 curl_silent     db '-sS', 0
 curl_post       db '-X', 0
 curl_post_val   db 'POST', 0

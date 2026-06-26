@@ -29,6 +29,7 @@ extern uint_to_str
 extern int_to_str_padded
 extern get_timestamp
 extern setup_signals
+extern use_visibox
 extern worklog_init
 extern worklog_read_context
 extern worklog_append_raw
@@ -37,6 +38,8 @@ extern worklog_trim_context
 extern build_payload
 extern parse_response
 extern exec_command
+extern exec_command_visibox
+extern exec_command_fallback
 extern check_blocked
 extern call_api
 
@@ -245,6 +248,7 @@ global active_system_prompt, active_system_prompt_len
 global successful_exec_count
 global cwd_buf, cwd_len
 global page_buf, page_total_len, page_offset, page_chunk_num, page_active
+global visibox_json_buf, visibox_pipe_fds, visibox_resp_pipe_fds, visibox_response_raw, visibox_resp_len, use_visibox
 
 response_buf    resb RESPONSE_BUF_SZ
 command_buf     resb COMMAND_BUF_SZ
@@ -282,6 +286,14 @@ page_offset     resq 1                  ; next byte offset to send
 page_chunk_num  resq 1                  ; current page number (1-based)
 page_active     resb 1                  ; 1 = pagination in progress
 
+; VisiBox integration buffers
+visibox_json_buf       resb COMMAND_BUF_SZ + 64  ; JSON request built for visibox
+visibox_pipe_fds       resd 2                     ; pipe fds for visibox stdin
+visibox_resp_pipe_fds  resd 2                     ; pipe fds for visibox stdout
+visibox_response_raw   resb OUTPUT_BUF_SZ         ; raw JSON response from visibox
+visibox_resp_len       resq 1                     ; bytes read from visibox response
+use_visibox            resb 1                     ; 1 = use visibox, 0 = fallback to /bin/sh
+
 ; ============================================================================
 ; .text — Main program
 ; ============================================================================
@@ -318,6 +330,20 @@ _start:
 
     ; Initialize Swarm/LangGraph orchestration
     call    orchestration_init
+
+    ; --- Auto-detect VisiBox binary ---
+    ; access(visibox_path, F_OK) — check if the binary exists and is executable
+    lea     rdi, [rel visibox_path]
+    mov     rax, SYS_ACCESS
+    mov     rsi, 1                ; X_OK = 1 (check execute permission)
+    syscall
+    test    rax, rax
+    jnz     .no_visibox           ; not found / not executable → use /bin/sh
+    mov     byte [rel use_visibox], 1
+    jmp     .visibox_detect_done
+.no_visibox:
+    mov     byte [rel use_visibox], 0
+.visibox_detect_done:
 
     ; --- Capture working directory via getcwd syscall ---
     ; getcwd(buf, size)

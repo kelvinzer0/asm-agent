@@ -122,8 +122,8 @@ instrument_init:
 ; ============================================================================
 ; Considers:
 ;   - Current dynamics level (must meet minimum)
-;   - Task type (implied by command patterns)
-;   - Historical success rate
+;   - Historical success rate (picks highest rate among eligible)
+;   - Recency bias: slight preference for recently used instrument
 ;
 ; Returns: rax = instrument index
 ; ============================================================================
@@ -133,43 +133,52 @@ instrument_select:
     push    rbx
     push    r12
     push    r13
+    push    r14
 
     lea     rbx, [rel musical_state]
     movzx   r12d, byte [rbx + MS_DYNAMICS]  ; r12 = current dynamics
 
     ; Default to trumpet (shell_exec)
     mov     r13d, INST_TRUMPET
+    mov     r14d, -1                        ; r14 = best success rate found
 
-    ; Filter instruments by dynamics level
+    ; Scan all instruments, pick the one with highest success rate
+    ; that meets the dynamics requirement
     xor     ecx, ecx            ; ecx = instrument index
     lea     rsi, [rel inst_min_dynamics]
 
-.dyn_loop:
+.scan_loop:
     cmp     ecx, INST_COUNT
-    jge     .dyn_done
+    jge     .scan_done
 
+    ; Check dynamics requirement
     movzx   eax, byte [rsi + rcx]
     cmp     eax, r12d
-    jg      .dyn_skip           ; instrument requires higher dynamics
+    jg      .scan_skip           ; instrument requires higher dynamics
 
-    ; This instrument is available — check success rate
-    push    rcx
+    ; Get success rate for this instrument
+    push    rcx                  ; save index
     call    .get_success_rate   ; eax = success rate (0-100)
-    pop     rcx
+    mov     edx, eax             ; edx = this instrument's rate
+    pop     rcx                  ; restore index
 
-    ; Keep the instrument with highest success rate
-    ; (for now, just pick the first available one)
+    ; Compare with best so far
+    cmp     edx, r14d
+    jle     .scan_skip           ; not better than current best
+
+    ; New best found
     mov     r13d, ecx
-    jmp     .dyn_done
+    mov     r14d, edx
 
-.dyn_skip:
+.scan_skip:
     inc     ecx
-    jmp     .dyn_loop
+    jmp     .scan_loop
 
-.dyn_done:
+.scan_done:
     mov     byte [rel current_instrument], r13b
-    mov     rax, r13
+    mov     eax, r13
 
+    pop     r14
     pop     r13
     pop     r12
     pop     rbx

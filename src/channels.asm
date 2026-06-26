@@ -42,6 +42,7 @@ global channel_set_mask
 global channel_is_active
 global channel_write_debug
 global channel_write_error
+global channel_flush_all
 
 ; ============================================================================
 section .data
@@ -290,3 +291,81 @@ channel_write_debug:
 channel_write_error:
     mov     rdx, CH_HARP
     jmp     channel_route
+
+; ============================================================================
+; channel_flush_all — Flush all buffered channel data to output
+; ============================================================================
+; Called at key points (DONE, error, shutdown) to ensure buffered
+; debug/error/event data is not lost.
+; ============================================================================
+channel_flush_all:
+    push    rbp
+    mov     rbp, rsp
+    push    rbx
+    push    r12
+    push    r13
+
+    ; --- Flush error buffer (Harp) → stderr if non-empty ---
+    lea     r12, [rel channel_error_buf]
+    mov     rbx, [rel channel_error_ptr]
+    sub     rbx, r12                ; rbx = error buffer fill length
+    test    rbx, rbx
+    jz      .flush_err_done
+
+    ; Write error buffer directly to stderr
+    mov     rax, SYS_WRITE
+    mov     edi, STDERR
+    lea     rsi, [rel channel_error_buf]
+    mov     rdx, rbx
+    syscall
+
+    ; Reset pointer
+    lea     rax, [rel channel_error_buf]
+    mov     [rel channel_error_ptr], rax
+
+.flush_err_done:
+
+    ; --- Flush debug buffer (Tenor) → stderr if non-empty ---
+    lea     r12, [rel channel_debug_buf]
+    mov     rbx, [rel channel_debug_ptr]
+    sub     rbx, r12                ; rbx = debug buffer fill length
+    test    rbx, rbx
+    jz      .flush_dbg_done
+
+    ; Write debug buffer to stderr
+    mov     rax, SYS_WRITE
+    mov     edi, STDERR
+    lea     rsi, [rel channel_debug_buf]
+    mov     rdx, rbx
+    syscall
+
+    ; Reset pointer
+    lea     rax, [rel channel_debug_buf]
+    mov     [rel channel_debug_ptr], rax
+
+.flush_dbg_done:
+
+    ; --- Flush event buffer (Timpani) → worklog if non-empty ---
+    lea     r12, [rel channel_event_buf]
+    mov     rbx, [rel channel_event_ptr]
+    sub     rbx, r12                ; rbx = event buffer fill length
+    test    rbx, rbx
+    jz      .flush_evt_done
+
+    ; Null-terminate for worklog_append_raw
+    mov     byte [r12 + rbx], 0
+
+    ; Append to worklog as raw data
+    lea     rdi, [rel channel_event_buf]
+    call    worklog_append_raw
+
+    ; Reset pointer
+    lea     rax, [rel channel_event_buf]
+    mov     [rel channel_event_ptr], rax
+
+.flush_evt_done:
+    pop     r13
+    pop     r12
+    pop     rbx
+    pop     rbp
+    ret

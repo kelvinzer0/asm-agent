@@ -9,6 +9,8 @@
 ;   conductor_beat       — Advance one beat (called each iteration)
 ;   conductor_adjust_tempo  — Adapt tempo based on success/failure
 ;   conductor_adjust_dynamics — Adapt dynamics based on context
+;   conductor_apply_rhythm  — Apply rhythm pattern to current delay
+;   conductor_set_rhythm     — Set active rhythm pattern programmatically
 ;   conductor_next_measure  — Start new measure cycle
 ;   conductor_get_delay_ns  — Get current beat delay in nanoseconds
 ;   conductor_should_stop   — Check if conductor signals stop
@@ -39,6 +41,8 @@ global conductor_init
 global conductor_beat
 global conductor_adjust_tempo
 global conductor_adjust_dynamics
+global conductor_apply_rhythm
+global conductor_set_rhythm
 global conductor_next_measure
 global conductor_get_delay_ns
 global conductor_should_stop
@@ -60,6 +64,47 @@ tempo_accel_threshold equ 3     ; N consecutive successes → speed up
 tempo_decel_threshold equ 2     ; N consecutive failures → slow down
 dynamic_up_threshold   equ 5    ; N successes → increase dynamics
 dynamic_down_threshold equ 2    ; N failures → decrease dynamics
+
+; Rhythm pattern multipliers (applied to base tempo delay)
+; Each rhythm has a cycle of multipliers, expressed as fixed-point 8.8
+; (value / 256 = actual multiplier)
+; Pattern cycle lengths stored separately
+rhythm_cycle_len:
+    db 2    ; STEADY:     X . X .  (2-beat cycle)
+    db 6    ; ACCEL:      X . X . X X X  (6-beat cycle, speeds up)
+    db 6    ; DECEL:      X X X X . . .  (6-beat cycle, slows down)
+    db 2    ; CALL_RESP:  X .  (2-beat, long pause between)
+    db 3    ; WALTZ:      X . .  (3-beat, 2/3 of time is pause)
+    db 3    ; SWING:      X..X.. (3-beat, uneven)
+    db 4    ; SYNCOPATED: X . . X  (4-beat, off-beat accent)
+
+; Rhythm multiplier tables (fixed-point 8.8: 256 = 1.0x)
+; Each entry is a qword to match ns arithmetic
+section .rodata
+rhythm_steady_mults:
+    dq 256, 256                 ; 1.0x, 1.0x — constant
+rhythm_accel_mults:
+    dq 256, 256, 256, 200, 150, 100   ; 1.0, 1.0, 1.0, 0.78, 0.59, 0.39
+rhythm_decel_mults:
+    dq 100, 150, 200, 300, 400, 500   ; 0.39, 0.59, 0.78, 1.17, 1.56, 1.95
+rhythm_call_resp_mults:
+    dq 300, 80                  ; 1.17x action, 0.31x pause
+rhythm_waltz_mults:
+    dq 350, 30, 30              ; 1.37x, 0.12x, 0.12x
+rhythm_swing_mults:
+    dq 300, 50, 200             ; 1.17x, 0.20x, 0.78x
+rhythm_syncopated_mults:
+    dq 350, 50, 30, 300         ; 1.37x, 0.20x, 0.12x, 1.17x
+
+; Table of pointers to rhythm multiplier arrays
+rhythm_mult_tables:
+    dq rhythm_steady_mults
+    dq rhythm_accel_mults
+    dq rhythm_decel_mults
+    dq rhythm_call_resp_mults
+    dq rhythm_waltz_mults
+    dq rhythm_swing_mults
+    dq rhythm_syncopated_mults
 
 ; ============================================================================
 section .rodata
@@ -247,15 +292,16 @@ conductor_adjust_tempo:
     inc     byte [rbx + MS_FAILURE_STREAK]
     mov     byte [rbx + MS_SUCCESS_STREAK], 0  ; reset success streak
 
-    ; Check if we should slow down
+    ; Check if we should slow down (2+ consecutive failures)
     movzx   eax, byte [rbx + MS_FAILURE_STREAK]
     cmp     eax, tempo_decel_threshold
     jl      .tempo_done
 
-    ; Slow down: increment tempo index (higher index = slower)
+    ; Slow down: decrement tempo index (lower index = slower delay)
+    ; Index 0 = LARGO (60s, slowest) → Index 6 = PRESTISSIMO (0s, fastest)
     movzx   eax, byte [rbx + MS_TEMPO]
-    cmp     eax, TEMPO_LARGO
-    jle     .tempo_clamp_lo
+    test    eax, eax
+    jz      .tempo_clamp_lo       ; already at slowest
     dec     al
     mov     byte [rbx + MS_TEMPO], al
     ; Update beat interval
@@ -279,12 +325,13 @@ conductor_adjust_tempo:
     mov     byte [rbx + MS_CONFIDENCE], al
 .conf_max:
 
-    ; Check if we should speed up
+    ; Check if we should speed up (3+ consecutive successes)
     movzx   eax, byte [rbx + MS_SUCCESS_STREAK]
     cmp     eax, tempo_accel_threshold
     jl      .tempo_done
 
-    ; Speed up: decrement tempo index (lower index = faster)
+    ; Speed up: increment tempo index (higher index = faster delay)
+    ; Index 0 = LARGO (60s, slowest) → Index 6 = PRESTISSIMO (0s, fastest)
     movzx   eax, byte [rbx + MS_TEMPO]
     cmp     eax, TEMPO_PRESTISSIMO
     jge     .tempo_clamp_hi
@@ -381,13 +428,88 @@ conductor_next_measure:
     ret
 
 ; ============================================================================
+; conductor_set_rhythm — Set active rhythm pattern
+; ============================================================================
+; Input:  dil = rhythm pattern index (RHYTHM_STEADY, etc.)
+; ============================================================================
+conductor_set_rhythm:
+    lea     rax, [rel musical_state]
+    mov     byte [rax + MS_RHYTHM_PATTERN], dil
+    ret
+
+; ============================================================================
+; conductor_apply_rhythm — Get delay with rhythm pattern applied
+; ============================================================================
+; Takes the base tempo delay and modulates it according to the active
+; rhythm pattern. Each rhythm defines a cycle of multipliers (fixed-point
+; 8.8 format: 256 = 1.0x). The current beat position within the cycle
+; determines which multiplier to apply.
+;
+; Returns: rax = rhythm-modulated delay in nanoseconds
+; Clobbers: rcx, rdx
+; ============================================================================
+conductor_apply_rhythm:
+    push    rbx
+    push    r12
+
+    lea     rbx, [rel musical_state]
+
+    ; Get base delay
+    mov     rax, [rbx + MS_BEAT_NS]
+    test    rax, rax
+    jz      .rhythm_done          ; prestissimo — no delay, skip rhythm
+
+    mov     r12, rax              ; r12 = base delay (ns)
+
+    ; Get current rhythm pattern index
+    movzx   ecx, byte [rbx + MS_RHYTHM_PATTERN]
+    cmp     ecx, RHYTHM_COUNT
+    jb      .rhythm_idx_ok
+    mov     ecx, RHYTHM_STEADY
+.rhythm_idx_ok:
+
+    ; Get cycle length for this rhythm
+    lea     rax, [rel rhythm_cycle_len]
+    movzx   r8, byte [rax + rcx]   ; r8 = cycle length (save in r8, NOT rdx)
+
+    ; Get current beat position within cycle
+    ; Compute: position = beat_counter % cycle_length
+    movzx   rax, dword [rbx + MS_BEAT_COUNTER]  ; rax = beat counter (dividend)
+    xor     edx, edx                              ; rdx = 0 (high bits for div)
+    div     r8                                   ; rax = beat/cycle, rdx = beat%cycle = position
+
+    ; Load the multiplier for this position
+    ; rhythm_mult_tables[rhythm_idx] gives pointer to qword array
+    lea     rsi, [rel rhythm_mult_tables]
+    mov     rsi, [rsi + rcx * 8]   ; rsi = pointer to multiplier array
+    mov     rdx, [rsi + rdx * 8]   ; rdx = multiplier (fixed-point 8.8)
+
+    ; Apply: delay = (base_delay * multiplier) / 256
+    mov     rax, r12               ; rax = base delay
+    imul    rdx                    ; rdx:rax = base * multiplier
+    shr     rax, 8                 ; rax = (base * mult) / 256
+
+    ; Minimum delay: 100ms (100000000 ns) to prevent near-zero pauses
+    cmp     rax, 100000000
+    jae     .rhythm_done
+    mov     rax, 100000000
+
+.rhythm_done:
+    pop     r12
+    pop     rbx
+    ret
+
+; ============================================================================
 ; conductor_get_delay_ns — Get current beat delay in nanoseconds
 ; ============================================================================
+; Now applies rhythm pattern modulation on top of base tempo.
 ; Returns: rax = delay in nanoseconds
 ; ============================================================================
 conductor_get_delay_ns:
-    lea     rax, [rel musical_state]
-    mov     rax, [rax + MS_BEAT_NS]
+    ; Apply rhythm modulation on top of base tempo.
+    ; conductor_apply_rhythm reads MS_BEAT_NS directly from musical_state.
+    ; Returns: rax = delay in nanoseconds
+    call    conductor_apply_rhythm
     ret
 
 ; ============================================================================

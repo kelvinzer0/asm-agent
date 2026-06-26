@@ -167,12 +167,13 @@ dyn_multipliers:
 
 ; --- Musical State Structure Offsets ---
 ; MusicalState: 32 bytes
+; Layout: qword + dwords first for natural alignment on x86-64
 %define MS_STATE_SIZE           32
 
-%define MS_TEMPO                0   ; byte: current tempo index
-%define MS_BEAT_NS              1   ; qword (at offset 1, unaligned): nanoseconds per beat
-%define MS_BEAT_COUNTER         9   ; dword: current beat in measure
-%define MS_MEASURE_COUNTER      13  ; dword: current measure number
+%define MS_BEAT_NS              0   ; qword (aligned): nanoseconds per beat
+%define MS_BEAT_COUNTER         8   ; dword (aligned): current beat in measure
+%define MS_MEASURE_COUNTER      12  ; dword (aligned): current measure number
+%define MS_TEMPO                16  ; byte: current tempo index
 %define MS_RHYTHM_PATTERN       17  ; byte: rhythm pattern
 %define MS_DYNAMICS             18  ; byte: dynamics level
 %define MS_DYNAMIC_DELTA        19  ; byte: dynamics change per measure
@@ -195,11 +196,11 @@ dyn_multipliers:
 
 %macro MUSICAL_INIT 1
     ; Initialize MusicalState at address %1
-    mov     byte [%1 + MS_TEMPO], TEMPO_MODERATO
     mov     rax, 5000000000
     mov     qword [%1 + MS_BEAT_NS], rax         ; 5 seconds
     mov     dword [%1 + MS_BEAT_COUNTER], 0
     mov     dword [%1 + MS_MEASURE_COUNTER], 0
+    mov     byte [%1 + MS_TEMPO], TEMPO_MODERATO
     mov     byte [%1 + MS_RHYTHM_PATTERN], RHYTHM_STEADY
     mov     byte [%1 + MS_DYNAMICS], DYN_MF
     mov     byte [%1 + MS_DYNAMIC_DELTA], 0
