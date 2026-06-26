@@ -11,7 +11,7 @@ ASM-AGENT is a zero-dependency, statically-linked Linux binary that implements a
 
 - **Pure x86-64 Assembly** — NASM, Linux System V ABI, no libc, no runtime dependencies
 - **OpenAI-Compatible API** — Works with any `/v1/chat/completions` endpoint (OpenAI, Cloudflare Workers AI, Ollama, LM Studio, etc.)
-- **Tool Calling** — 4 built-in tools: `run_command`, `task_complete`, `github_search`, `github_read`
+- **Tool Calling** — Built-in tools: `run_command` (shell execution via VisiBox/sh), `task_complete` (done signal)
 - **VisiBox Integration** — Structured JSON command execution via [VisiBox](https://github.com/kelvinzer0/visibox) pipe protocol, with automatic fallback to `/bin/sh`
 - **Swarm/Orchestration Modes** — LangGraph-style multi-agent mode switching (Planner → Researcher → Executor → Verifier)
 - **Musical Conductor** — Tempo/dynamics modulation drives the agent loop rhythm
@@ -137,14 +137,14 @@ make visibox-clean  # Remove VisiBox binary only
 
 ## Tools
 
-ASM-AGENT supports 4 tools in its system prompt:
+ASM-AGENT defines tools in its system prompt:
 
 | Tool | Description |
 |------|-------------|
 | `run_command` | Execute shell commands with structured JSON output (VisiBox) or raw output (sh) |
 | `task_complete` | Signal that the task is done with a summary |
-| `github_search` | Search GitHub repositories and code |
-| `github_read` | Read file contents from GitHub repositories |
+
+> **Note:** `github_search` and `github_read` are listed in the system prompt as future tools. The LLM can simulate them by running `curl` commands via `run_command` (e.g., `curl -s https://api.github.com/search/...`).
 
 ### Command Execution
 
