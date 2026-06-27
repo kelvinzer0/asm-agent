@@ -18,11 +18,16 @@ The installer will prompt you for:
 - **API endpoint URL** (default: Cloudflare Workers AI)
 - **Model name** (default: LLaMA 3.1 8B FP8)
 
-After install:
+After install, use the wrapper (auto-sources `.env`):
 
 ```bash
+./run.sh "List all files in /tmp and summarize them"
+```
+
+Or manually:
+```bash
 source .env
-./asm-agent "List all files in /tmp and summarize them"
+./asm-agent "your task"
 ```
 
 ### Non-interactive install
@@ -32,8 +37,8 @@ curl -sSL https://raw.githubusercontent.com/kelvinzer0/asm-agent/master/install.
 ```
 
 ```bash
-# Full options
-bash install.sh --api-key=sk-xxx --api-url=https://api.openai.com/v1/chat/completions --model=gpt-4o
+# Full options (--api-url auto-appends /chat/completions if missing)
+bash install.sh --api-key=sk-xxx --api-url=https://api.openai.com/v1 --model=gpt-4o
 ```
 
 ### Install to system path
@@ -84,12 +89,12 @@ export ASM_AGENT_API_URL="https://api.openai.com/v1/chat/completions"
 export ASM_AGENT_MODEL="gpt-4o"
 ./asm-agent "your task"
 
-# Or via installer (one-liner)
+# Or via installer (one-liner) — URL auto-appends /chat/completions
 curl -sSL https://raw.githubusercontent.com/kelvinzer0/asm-agent/master/install.sh | bash -s -- \
   --api-key=sk-xxx \
-  --api-url=https://api.openai.com/v1/chat/completions \
+  --api-url=https://api.openai.com/v1 \
   --model=gpt-4o
-source .env && ./asm-agent "your task"
+./run.sh "your task"
 ```
 
 ## Features
