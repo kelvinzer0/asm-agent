@@ -17,13 +17,18 @@ model_name      db 'cf/@cf/meta/llama-3.1-8b-instruct-fp8-fast', 0
 
 ; --- System Prompt ---
 system_prompt:
-    db 'You are ASM-AGENT, an autonomous AI on Linux.', 10, 10
+    db 'You are ASM-AGENT, an autonomous AI agent on Linux with VisiBox shell.', 10, 10
     db 'HOW TO WORK:', 10
     db '1. Read the TASK below carefully', 10
     db '2. Read CONTEXT to see what you already did', 10
     db '3. Do the NEXT step that is not yet done', 10
     db '4. Never repeat a command that already succeeded', 10
     db '5. When all steps complete, respond DONE:', 10, 10
+    db 'AVAILABLE TOOLS:', 10
+    db '  1. EXEC (tool_call tags): Execute shell commands. Output has line numbers.', 10
+    db '  2. FETCH_PAGE: Get next page of truncated output.', 10
+    db '  3. SEARCH: <keyword> to jump to output containing that keyword.', 10
+    db '  4. SESSION: <command> Run in persistent shell (cd/env/alias kept).', 10, 10
     db 'OUTPUT FORMAT (you MUST use these exact tags):', 10
     db '  To execute a command:', 10
     db '    <tool_call>', 10
@@ -34,10 +39,14 @@ system_prompt:
     db '  When task is done:', 10
     db '  DONE: <summary>', 10, 10
     db 'IMPORTANT:', 10
-    db '- Commands WITHOUT <tool_call> tags will NOT be executed', 10
+    db '- Commands WITHOUT tool_call tags will NOT be executed', 10
     db '- Use absolute paths for file writes', 10
     db '- Use python3 NOT python', 10
-    db '- Each step must do something NEW, not repeat', 0
+    db '- Each step must do something NEW, not repeat', 10
+    db '- If output shows [truncated], reply FETCH_PAGE: to see more', 10
+    db '- Use SEARCH: <keyword> to find specific info in long output', 10
+    db '- Use SESSION: for cd, export, alias, and multi-step workflows', 0
+
 system_prompt_end:
 
 %define SYSTEM_PROMPT_LEN (system_prompt_end - system_prompt)
@@ -55,6 +64,18 @@ visibox_req_s   db '{"type":"execute","command":"', 0
 visibox_req_e   db '"}', 0
 visibox_req_s_len equ visibox_req_e - visibox_req_s   ; 30 bytes (prefix only)
 visibox_req_e_len equ $ - visibox_req_e               ; 3 bytes (suffix only)
+
+; --- VisiBox JSON key anchors (shared across all modules) ---
+vb_key_exit_code     db '"exit_code":', 0
+vb_key_output        db '"output":', 0
+vb_key_truncated     db '"output_truncated":', 0
+vb_key_cursor        db '"cursor":', 0
+vb_key_has_next      db '"has_next":', 0
+vb_key_response_id   db '"response_id":', 0
+vb_key_type          db '"type":', 0
+vb_key_err           db '"error":', 0
+vb_type_error        db 'VisiBox error', 0
+
 curl_silent     db '-sS', 0
 curl_post       db '-X', 0
 curl_post_val   db 'POST', 0

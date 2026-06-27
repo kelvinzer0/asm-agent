@@ -42,6 +42,15 @@ extern exec_command_fallback
 extern check_blocked
 extern call_api
 
+; --- VisiBox tool handlers (modular) ---
+extern tool_exec_handler
+extern tool_fetch_page_handler
+extern tool_search_handler
+extern tool_session_handler
+
+; --- VisiBox client ---
+extern vb_saved_has_next
+
 ; --- Musical Orchestration externs ---
 extern conductor_init
 extern conductor_beat
@@ -150,6 +159,28 @@ tui_output_exit_post db ']', ESC, '[0m', 10, 0
 tui_output_body_pre db ESC, '[38;5;245m', '  ', 0xE2, 0x94, 0x82, ' ', ESC, '[0m', ESC, '[38;5;250m', 0
 tui_output_nl       db ESC, '[0m', 10, ESC, '[38;5;245m', '  ', 0xE2, 0x94, 0x82, ' ', ESC, '[0m', ESC, '[38;5;250m', 0
 
+tui_fetch_pre  db ESC, '[38;5;183m'
+              db '  ', 0xF0, 0x9F, 0x93, 0x84, ' FETCH_PAGE'          ; 📄 FETCH_PAGE
+              db ESC, '[0m', 10, 0
+
+tui_search_pre db ESC, '[38;5;180m'
+              db '  ', 0xF0, 0x9F, 0x94, 0x8D, ' SEARCH'              ; 🔍 SEARCH
+              db ESC, '[0m', ESC, '[38;5;255m', '`', 0
+tui_search_post db '`', ESC, '[0m', 10, 0
+
+tui_session_pre db ESC, '[38;5;177m'
+              db '  ', 0xF0, 0x9F, 0x92, 0xBB, ' SESSION'            ; 💻 SESSION
+              db ESC, '[0m', ESC, '[38;5;255m', '`', 0
+tui_session_post db '`', ESC, '[0m', 10, 0
+
+tui_vb_pag_pre db ESC, '[38;5;183m'
+              db '  ', 0xE2, 0x96, 0xB6, ' VisiBox: next page (cursor pagination)'  ; ▶ VisiBox: next page
+              db ESC, '[0m', 10, 0
+
+tui_vb_pag_end db ESC, '[38;5;245m'
+              db '  ', 0xE2, 0x94, 0x82, ' No more pages available via VisiBox cursor.'
+              db ESC, '[0m', 10, 0
+
 tui_done_pre  db 10, ESC, '[1m', ESC, '[38;5;114m'
               db '  ', 0xE2, 0x9C, 0x85, ' DONE: '                    ; ✅ DONE:
               db ESC, '[0m', ESC, '[38;5;255m', 0
@@ -228,6 +259,9 @@ wl_page_bytes   db ' bytes. Reply NEXT_PAGE to see more.', 10, 0
 wl_page_last    db '[PAGINATED] Last page shown. All output delivered.', 10, 0
 
 wl_label_page   db 'OUTPUT (page)', 0
+no_vb_search_msg db 'SEARCH is only available with VisiBox. Use FETCH_PAGE or NEXT_PAGE instead.', 0
+no_vb_session_msg db 'SESSION is only available with VisiBox. Using EXEC instead (state not persisted).', 0
+wl_vb_more_hint db 'More pages available. Reply FETCH_PAGE to continue.', 10, 0
 
 ; Delay timespec (2 seconds)
 section .data
@@ -582,6 +616,12 @@ _start:
     je      .handle_done
     cmp     eax, ACTION_NEXT_PAGE
     je      .handle_next_page
+    cmp     eax, ACTION_FETCH_PAGE
+    je      .handle_fetch_page
+    cmp     eax, ACTION_SEARCH_JUMP
+    je      .handle_search
+    cmp     eax, ACTION_SESSION
+    je      .handle_session
     jmp     .handle_parse_error
 
 ; ============================================================================
@@ -773,6 +813,191 @@ _start:
     jmp     .loop_top
 
 ; ============================================================================
+; Handle FETCH_PAGE action — VisiBox cursor-based pagination
+; ============================================================================
+; Uses the saved response_id + cursor from the last execute call to fetch
+; the next page of output directly from VisiBox (server-side pagination).
+; This is different from NEXT_PAGE which uses local page_buf pagination.
+; ============================================================================
+.handle_fetch_page:
+    ; --- Try VisiBox cursor pagination first ---
+    cmp     byte [rel use_visibox], 1
+    jne     .fetch_fallback_local
+
+    ; Check if VisiBox has a cursor (has_next from last execute)
+    cmp     byte [rel vb_saved_has_next], 1
+    je      .fetch_vb_do
+
+    ; No VisiBox cursor — fall through to local pagination
+.fetch_fallback_local:
+    ; Delegate to NEXT_PAGE handler (local page_buf pagination)
+    jmp     .handle_next_page
+
+.fetch_vb_do:
+    PRINT   STDOUT, tui_vb_pag_pre
+
+    ; Call the modular fetch_page handler
+    call    tool_fetch_page_handler
+    test    eax, eax
+    jnz     .fetch_vb_end
+
+    ; Success — display output
+    PRINT   STDOUT, tui_output_pre
+    PRINT   STDOUT, tui_output_body_pre
+    mov     rax, [output_len]
+    cmp     rax, 2048
+    jle     .fetch_disp_ok
+    mov     rax, 2048
+.fetch_disp_ok:
+    PRINT_LEN STDOUT, output_buf, rax
+    PRINT   STDOUT, ansi_reset
+    PRINT   STDOUT, newline
+
+    ; Log to worklog as output
+    lea     rdi, [wl_label_output]
+    lea     rsi, [rel output_buf]
+    call    worklog_append_entry
+
+    ; Check if more pages available
+    cmp     byte [rel vb_saved_has_next], 1
+    je      .fetch_more_pages
+
+.fetch_vb_end:
+    call    delay_loop
+    jmp     .loop_top
+
+.fetch_more_pages:
+    ; Tell the model more pages are available
+    lea     rdi, [wl_label_thought]
+    lea     rsi, [rel wl_vb_more_hint]
+    call    worklog_append_entry
+
+    call    delay_loop
+    jmp     .loop_top
+
+; ============================================================================
+; Handle SEARCH action — VisiBox search_jump
+; ============================================================================
+; Searches for a keyword in the last command's output and jumps to the
+; page containing that keyword.
+; ============================================================================
+.handle_search:
+    cmp     byte [rel use_visibox], 1
+    jne     .search_fallback
+
+    ; Display search keyword
+    PRINT   STDOUT, tui_search_pre
+    PRINT   STDOUT, command_buf
+    PRINT   STDOUT, tui_search_post
+
+    ; Call the modular search handler
+    call    tool_search_handler
+    test    eax, eax
+    jnz     .search_err
+
+    ; Success — display the page containing the keyword
+    PRINT   STDOUT, tui_output_pre
+    PRINT   STDOUT, tui_output_body_pre
+    mov     rax, [output_len]
+    cmp     rax, 2048
+    jle     .search_disp_ok
+    mov     rax, 2048
+.search_disp_ok:
+    PRINT_LEN STDOUT, output_buf, rax
+    PRINT   STDOUT, ansi_reset
+    PRINT   STDOUT, newline
+
+    ; Log to worklog
+    lea     rdi, [wl_label_thought]
+    lea     rsi, [rel command_buf]
+    call    worklog_append_entry
+
+    lea     rdi, [wl_label_output]
+    lea     rsi, [rel output_buf]
+    call    worklog_append_entry
+
+    call    conductor_beat
+    call    delay_loop
+    jmp     .loop_top
+
+.search_err:
+    PRINT   STDOUT, tui_error_pre
+    PRINT   STDOUT, command_buf
+    PRINT   STDOUT, ansi_reset
+    PRINT   STDOUT, newline
+    call    delay_loop
+    jmp     .loop_top
+
+.search_fallback:
+    ; No visibox — search not available, treat as think
+    lea     rdi, [rel command_buf]
+    lea     rsi, [rel no_vb_search_msg]
+    call    str_copy
+    jmp     .handle_think
+
+; ============================================================================
+; Handle SESSION action — VisiBox persistent shell
+; ============================================================================
+; Runs the command in a VisiBox daemon session where cd, export, alias
+; persist across calls. Falls back to EXEC if VisiBox unavailable.
+; ============================================================================
+.handle_session:
+    cmp     byte [rel use_visibox], 1
+    jne     .session_fallback
+
+    ; Display session command
+    PRINT   STDOUT, tui_session_pre
+    PRINT   STDOUT, command_buf
+    PRINT   STDOUT, tui_session_post
+
+    ; Call the modular session handler
+    call    tool_session_handler
+    mov     r12d, eax               ; save exit code
+
+    ; Display output
+    PRINT   STDOUT, tui_output_pre
+    PRINT   STDOUT, tui_output_body_pre
+    mov     rax, [output_len]
+    cmp     rax, 2048
+    jle     .session_disp_ok
+    mov     rax, 2048
+.session_disp_ok:
+    PRINT_LEN STDOUT, output_buf, rax
+    PRINT   STDOUT, ansi_reset
+    PRINT   STDOUT, newline
+
+    ; Display exit code (saved in r12d)
+    PRINT   STDOUT, tui_output_exit_pre
+    lea     rdi, [rel exit_str_buf]
+    mov     eax, r12d
+    call    uint_to_str
+    PRINT   STDOUT, exit_str_buf
+    PRINT   STDOUT, tui_output_exit_post
+
+    ; Log to worklog as EXEC (session is just a special exec)
+    lea     rdi, [wl_label_exec]
+    lea     rsi, [rel command_buf]
+    call    worklog_append_entry
+
+    lea     rdi, [wl_label_output]
+    lea     rsi, [rel output_buf]
+    call    worklog_append_entry
+
+    ; Increment streak counters (same as EXEC)
+    inc     dword [rel exec_streak]
+    mov     dword [rel think_streak], 0
+    inc     dword [rel successful_exec_count]
+
+    call    conductor_beat
+    call    delay_loop
+    jmp     .loop_top
+
+.session_fallback:
+    ; No VisiBox — session not available, delegate to EXEC handler
+    ; command_buf still has the original command
+    jmp     .handle_exec
+
+; ============================================================================
 ; Handle THINK action
 ; ============================================================================
 .handle_think:
@@ -935,10 +1160,7 @@ _start:
     PRINT   STDOUT, command_buf
     PRINT   STDOUT, tui_exec_post
 
-    ; Check if command is blocked
-    call    check_blocked
-    test    eax, eax
-    jnz     .command_blocked
+    ; Note: check_blocked is called inside tool_exec_handler
 
     ; --- Duplicate command detection ---
     ; Compare command_buf with last_command_buf
@@ -1046,8 +1268,8 @@ _start:
     call    worklog_append_entry
 
 .handle_exec_run:
-    ; Execute the command
-    call    exec_command
+    ; Execute the command via modular tool handler
+    call    tool_exec_handler
     mov     r12d, eax               ; save exit status
 
     ; Display output header

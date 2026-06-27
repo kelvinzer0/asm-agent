@@ -80,6 +80,9 @@
 %define ACTION_THINK        1
 %define ACTION_DONE         2
 %define ACTION_NEXT_PAGE    3
+%define ACTION_FETCH_PAGE   4          ; VisiBox fetch_page
+%define ACTION_SEARCH_JUMP  5          ; VisiBox search_jump
+%define ACTION_SESSION      6          ; VisiBox session (persistent shell)
 %define ACTION_ERROR        -1
 
 ; --- Output Pagination ---

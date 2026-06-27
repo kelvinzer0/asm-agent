@@ -28,6 +28,11 @@ SRCS = src/main.asm \
        src/json.asm \
        src/parser.asm \
        src/executor.asm \
+       src/visibox_client.asm \
+       src/tool_exec.asm \
+       src/tool_fetch_page.asm \
+       src/tool_search.asm \
+       src/tool_session.asm \
        src/api.asm \
        src/conductor.asm \
        src/instruments.asm \

@@ -68,6 +68,9 @@ prefix_exec:    db 'EXEC:', 0
 prefix_think:   db 'THINK:', 0
 prefix_done:    db 'DONE:', 0
 prefix_next_page: db 'NEXT_PAGE:', 0
+prefix_fetch_page: db 'FETCH_PAGE:', 0
+prefix_search:    db 'SEARCH:', 0
+prefix_session:   db 'SESSION:', 0
 
 ; ============================================================================
 section .text
@@ -387,6 +390,27 @@ parse_response:
     test    rax, rax
     jnz     .found_next_page
 
+    ; --- Check FETCH_PAGE: (search anywhere) ---
+    lea     rdi, [rel command_buf]
+    lea     rsi, [rel prefix_fetch_page]
+    call    str_find
+    test    rax, rax
+    jnz     .found_fetch_page
+
+    ; --- Check SEARCH: (search anywhere) ---
+    lea     rdi, [rel command_buf]
+    lea     rsi, [rel prefix_search]
+    call    str_find
+    test    rax, rax
+    jnz     .found_search
+
+    ; --- Check SESSION: (search anywhere) ---
+    lea     rdi, [rel command_buf]
+    lea     rsi, [rel prefix_session]
+    call    str_find
+    test    rax, rax
+    jnz     .found_session
+
     ; --- No recognized prefix: default to THINK ---
 
 .fallback_think:
@@ -435,6 +459,36 @@ parse_response:
     ; NEXT_PAGE doesn't need extracted content — just return the action
     mov     eax, ACTION_NEXT_PAGE
     jmp     .epilogue
+
+.found_fetch_page:
+    ; FETCH_PAGE: — extract optional content (ignored by handler, but clear command_buf)
+    mov     r13, rax
+    lea     rdi, [rel prefix_fetch_page]
+    call    str_len
+    mov     rbx, rax
+    add     r13, rbx
+    mov     r15d, ACTION_FETCH_PAGE
+    jmp     .extract_from_ptr
+
+.found_search:
+    ; SEARCH: — extract keyword into command_buf
+    mov     r13, rax
+    lea     rdi, [rel prefix_search]
+    call    str_len
+    mov     rbx, rax
+    add     r13, rbx
+    mov     r15d, ACTION_SEARCH_JUMP
+    jmp     .extract_from_ptr
+
+.found_session:
+    ; SESSION: — extract command into command_buf
+    mov     r13, rax
+    lea     rdi, [rel prefix_session]
+    call    str_len
+    mov     rbx, rax
+    add     r13, rbx
+    mov     r15d, ACTION_SESSION
+    jmp     .extract_from_ptr
 
     ; ---------------------------------------------------------------
     ; Extract from pointer: copy until newline or null

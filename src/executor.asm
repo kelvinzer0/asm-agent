@@ -74,18 +74,9 @@ blocked_list:
 ; --- Paths ---
 devnull_path     db '/dev/null', 0
 
-; --- VisiBox JSON parsing anchors ---
-vb_key_exit_code   db '"exit_code":', 0   ; 12 bytes
-vb_key_output      db '"output":', 0      ; 9 bytes — used to locate key
+; --- VisiBox JSON parsing anchors (unique to executor, shared ones in config.inc) ---
 vb_quote_char      db '"', 0               ; 1 byte  — opening quote of string value
-vb_key_err         db '"error":', 0
-vb_key_type        db '"type":', 0
-vb_key_truncated   db '"output_truncated":', 0
-vb_key_cursor      db '"cursor":', 0
-vb_key_has_next    db '"has_next":', 0
 vb_key_duration    db '"duration_ms":', 0
-
-; VisiBox error type
 vb_type_error      db '"execute_error"', 0
 
 ; ============================================================================
