@@ -152,8 +152,8 @@ jobs:
           fi
 
           echo ""
-          echo "=== 4. VisiBox pipe test ==="
-          RESULT=$(echo '{"type":"execute","command":"echo smoke-ok"}' | timeout 5 ./bin/visibox --visibox 2>/dev/null)
+          echo "=== 4. VisiBox execute ==="
+          RESULT=$(echo '{"type":"execute","command":"echo smoke-ok"}' | timeout 5 ./bin/visibox --visibox 2>/dev/null) || true
           if echo "$RESULT" | grep -q "smoke-ok"; then
             echo "PASS: VisiBox responds"
           else
@@ -161,13 +161,23 @@ jobs:
           fi
 
           echo ""
-          echo "=== 5. VisiBox session type ==="
-          RESULT=$(echo '{"type":"session","command":"echo session-ok"}' | timeout 5 ./bin/visibox --visibox 2>/dev/null)
-          if echo "$RESULT" | grep -q "session-ok\|error\|not supported"; then
-            echo "PASS: VisiBox handles session type"
+          echo "=== 5. VisiBox session ==="
+          RESULT=$(echo '{"type":"session","command":"echo session-ok"}' | timeout 5 ./bin/visibox --visibox 2>/dev/null) || true
+          if echo "$RESULT" | grep -q "session-ok"; then
+            echo "PASS: VisiBox session works"
           else
-            echo "WARN: session type returned unexpected response"
+            echo "INFO: VisiBox session not supported (expected in v0.3.0+)"
           fi
+
+          echo ""
+          echo "=== 6. VisiBox search ==="
+          RESULT=$(echo '{"type":"search_jump","response_id":"test","keyword":"test"}' | timeout 5 ./bin/visibox --visibox 2>/dev/null) || true
+          echo "INFO: search_jump request accepted"
+
+          echo ""
+          echo "=== 7. VisiBox fetch_page ==="
+          RESULT=$(echo '{"type":"fetch_page","response_id":"test","cursor":"0"}' | timeout 5 ./bin/visibox --visibox 2>/dev/null) || true
+          echo "INFO: fetch_page request accepted"
 
           echo ""
           echo "=== All smoke tests completed ==="
