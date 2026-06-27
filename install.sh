@@ -3,15 +3,15 @@
 # install.sh — ASM-AGENT Installer
 # ============================================================================
 # Downloads prebuilt binary + VisiBox from GitHub releases.
+# Installs to /usr/local/bin by default.
 # Prompts for API key and optional config during installation.
 # No build tools (NASM, etc.) required.
 #
 # Usage:
 #   curl -sSL https://raw.githubusercontent.com/kelvinzer0/asm-agent/master/install.sh | bash
-#   bash install.sh                        # Interactive install (prompts for API key)
-#   bash install.sh --api-key=sk-xxx       # Non-interactive, pass API key directly
-#   bash install.sh --prefix=/usr/local    # Install to system path
+#   curl -sSL ... | bash -s -- --api-key=sk-xxx
 #   bash install.sh --build                # Build from source instead (needs NASM)
+#   bash install.sh --prefix=/opt          # Custom prefix (installs to /opt/bin)
 #   bash install.sh --skip-config          # Skip configuration prompts
 # ============================================================================
 
@@ -29,8 +29,6 @@ NC='\033[0m'
 # --- Config ---
 REPO="kelvinzer0/asm-agent"
 PREFIX="${PREFIX:-/usr/local}"
-INSTALL_DIR="$(pwd)"
-INSTALL_TO_SYSTEM=false
 BUILD_FROM_SOURCE=false
 SKIP_CONFIG=false
 VISIBOX_VERSION="0.3.0"
@@ -49,7 +47,7 @@ detect_latest_version() {
     local api_url="https://api.github.com/repos/${REPO}/releases/latest"
     VERSION=$(curl -sLf "$api_url" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['tag_name'].lstrip('v'))" 2>/dev/null || echo "")
     if [ -z "$VERSION" ]; then
-        VERSION="0.6.0"  # fallback
+        VERSION="0.6.1"  # fallback
     fi
 }
 detect_latest_version
@@ -100,7 +98,6 @@ for arg in "$@"; do
     case "$arg" in
         --prefix=*)
             PREFIX="${arg#*=}"
-            INSTALL_TO_SYSTEM=true
             ;;
         --api-key=*)
             USER_API_KEY="${arg#*=}"
@@ -128,12 +125,14 @@ for arg in "$@"; do
         --help|-h)
             echo "Usage: bash install.sh [OPTIONS]"
             echo ""
+            echo "Installs asm-agent to \${PREFIX}/bin/ (default: /usr/local/bin)"
+            echo ""
             echo "Options:"
             echo "  (default)                Interactive install with config prompts"
             echo "  --api-key=SK-XXX         Set API key (skip prompt)"
             echo "  --api-url=URL            Set API URL (auto-appends /chat/completions if missing)"
             echo "  --model=MODEL            Set model name (skip prompt)"
-            echo "  --prefix=PATH            Install to PATH/bin/asm-agent (default: /usr/local)"
+            echo "  --prefix=PATH            Install to PATH/bin/ (default: /usr/local)"
             echo "  --build                  Build from source (requires NASM, binutils, make)"
             echo "  --skip-config            Skip all configuration prompts"
             echo "  -h, --help               Show this help"
@@ -142,8 +141,9 @@ for arg in "$@"; do
             echo "  ASM_AGENT_API_KEY        Your API key (or OPENAI_API_KEY)"
             echo ""
             echo "Examples:"
-            echo "  bash install.sh --api-key=sk-xxx --model=gpt-4o"
-            echo "  bash install.sh --prefix=/usr/local --api-url=https://api.openai.com/v1/chat/completions"
+            echo "  curl -sSL https://raw.githubusercontent.com/kelvinzer0/asm-agent/master/install.sh | bash"
+            echo "  curl -sSL ... | bash -s -- --api-key=sk-xxx --model=gpt-4o"
+            echo "  bash install.sh --prefix=/opt --api-url=https://api.openai.com/v1"
             exit 0
             ;;
         *)
@@ -151,6 +151,12 @@ for arg in "$@"; do
             ;;
     esac
 done
+
+# Derived paths
+DEST_BIN="$PREFIX/bin"
+DEST_LIB="$PREFIX/lib/asm-agent"
+DEST_VB_BIN="$DEST_LIB/bin"
+DEST_VB_CFG="$DEST_LIB/config"
 
 echo -e "${BOLD}"
 echo "  ╔═══════════════════════════════════════╗"
@@ -166,6 +172,8 @@ if [ "$ARCH" != "x86_64" ]; then
 fi
 ok "Architecture: x86_64"
 info "Latest release: v${VERSION}"
+info "Install prefix: $PREFIX"
+info "Binary dest:   $DEST_BIN/asm-agent"
 
 # --- Verify curl ---
 if ! check_cmd curl; then
@@ -195,7 +203,7 @@ configure() {
     # --- API Key (required) ---
     if [ -z "$USER_API_KEY" ]; then
         echo -e "${YELLOW}  ASM-AGENT needs an API key to call the LLM.${NC}"
-        echo -e "${DIM}  This will be stored locally in .env file (not uploaded anywhere).${NC}"
+        echo -e "${DIM}  This will be stored locally in ~/.asm-agent.env (not uploaded anywhere).${NC}"
         echo ""
 
         # Check if already set in environment
@@ -216,7 +224,7 @@ configure() {
             echo ""
             warn "No API key provided. You can set it later:"
             warn "  export ASM_AGENT_API_KEY=sk-your-key-here"
-            warn "  ./asm-agent \"your task\""
+            warn "  asm-agent \"your task\""
         fi
     fi
 
@@ -244,15 +252,10 @@ configure() {
 }
 
 # ============================================================================
-# Write .env file
+# Write .env file to ~/.asm-agent.env
 # ============================================================================
 write_env_file() {
-    local env_path="${INSTALL_DIR}/.env"
-
-    # If system install, write to home directory
-    if [ "$INSTALL_TO_SYSTEM" = true ]; then
-        env_path="${HOME}/.asm-agent.env"
-    fi
+    local env_path="${HOME}/.asm-agent.env"
 
     # Skip if no config to write
     if [ -z "$USER_API_KEY" ] && [ -z "$USER_API_URL" ] && [ -z "$USER_MODEL" ]; then
@@ -408,109 +411,64 @@ build_from_source() {
 }
 
 # ============================================================================
-# Install binary to destination
+# Install binary to ${PREFIX}/bin
 # ============================================================================
 install_binary() {
-    if [ "$INSTALL_TO_SYSTEM" = false ]; then
-        # Local install: copy to current directory
-        cp "$ASM_AGENT_SRC" "${INSTALL_DIR}/asm-agent"
-        chmod +x "${INSTALL_DIR}/asm-agent"
-        ok "Installed: ${INSTALL_DIR}/asm-agent"
+    # --- 1. Copy binary ---
+    mkdir -p "$DEST_BIN"
+    cp "$ASM_AGENT_SRC" "$DEST_BIN/asm-agent"
+    chmod +x "$DEST_BIN/asm-agent"
+    ok "Installed: $DEST_BIN/asm-agent"
 
-        if [ "$HAS_VISIBOX" = true ] && [ -f "$VISIBOX_SRC" ]; then
-            mkdir -p "${INSTALL_DIR}/bin"
-            cp "$VISIBOX_SRC" "${INSTALL_DIR}/bin/visibox"
-            chmod +x "${INSTALL_DIR}/bin/visibox"
-            ok "Installed: ${INSTALL_DIR}/bin/visibox"
-        fi
-
-        # Config directory
-        mkdir -p "${INSTALL_DIR}/config"
-        if [ -n "${VISIBOX_CONF_SRC:-}" ] && [ -f "$VISIBOX_CONF_SRC" ]; then
-            cp "$VISIBOX_CONF_SRC" "${INSTALL_DIR}/config/visibox.conf"
-        elif [ ! -f "${INSTALL_DIR}/config/visibox.conf" ]; then
-            printf '# VisiBox Configuration\nMAX_OUTPUT_BYTES=65536\nMAX_OUTPUT_LINES=500\nCOMMAND_TIMEOUT=30\nWORKING_DIR=.\n' \
-                > "${INSTALL_DIR}/config/visibox.conf"
-        fi
-        ok "Installed: ${INSTALL_DIR}/config/visibox.conf"
-
-        # Write .env
-        write_env_file
-
-        # Create a wrapper script that auto-sources .env
-        local env_path="${INSTALL_DIR}/.env"
-        local wrapper="${INSTALL_DIR}/run.sh"
-        cat > "$wrapper" << WRAPPER_EOF
-#!/usr/bin/env bash
-# asm-agent runner — auto-sources .env before launching
-# Generated by install.sh
-SCRIPT_DIR="\$(cd "\$(dirname "\$0")" && pwd)"
-[ -f "\$SCRIPT_DIR/.env" ] && source "\$SCRIPT_DIR/.env"
-exec "\$SCRIPT_DIR/asm-agent" "\$@"
-WRAPPER_EOF
-        chmod +x "$wrapper"
-        ok "Installed: ${INSTALL_DIR}/run.sh (auto-sources .env)"
-
-        echo ""
-        echo -e "${BOLD}  ── Quick Start ─────────────────────────────${NC}"
-        echo ""
-        if [ -f "${INSTALL_DIR}/.env" ]; then
-            echo -e "  ${GREEN}${INSTALL_DIR}/run.sh${NC} ${GREEN}\"your task here\"${NC}"
-            echo -e "  ${DIM}(or: source ${INSTALL_DIR}/.env && ./asm-agent ...)${NC}"
-        else
-            echo -e "  ${GREEN}export${NC} ASM_AGENT_API_KEY=sk-your-key"
-            echo -e "  ${INSTALL_DIR}/asm-agent ${GREEN}\"your task here\"${NC}"
-        fi
-        echo ""
-        return
-    fi
-
-    # System install
-    local dest="$PREFIX/bin"
-    sudo mkdir -p "$dest"
-    sudo cp "$ASM_AGENT_SRC" "$dest/asm-agent"
-    sudo chmod +x "$dest/asm-agent"
-    ok "Installed: $dest/asm-agent"
-
+    # --- 2. Copy VisiBox ---
     if [ "$HAS_VISIBOX" = true ] && [ -f "$VISIBOX_SRC" ]; then
-        local vdest="$PREFIX/lib/asm-agent/bin"
-        sudo mkdir -p "$vdest"
-        sudo cp "$VISIBOX_SRC" "$vdest/visibox"
-        sudo chmod +x "$vdest/visibox"
-        ok "Installed: $vdest/visibox"
-
-        # Config
-        local cdest="$PREFIX/lib/asm-agent/config"
-        sudo mkdir -p "$cdest"
-        if [ -n "${VISIBOX_CONF_SRC:-}" ] && [ -f "$VISIBOX_CONF_SRC" ]; then
-            sudo cp "$VISIBOX_CONF_SRC" "$cdest/visibox.conf"
-        else
-            printf '# VisiBox Configuration\nMAX_OUTPUT_BYTES=65536\nMAX_OUTPUT_LINES=500\nCOMMAND_TIMEOUT=30\nWORKING_DIR=.\n' \
-                | sudo tee "$cdest/visibox.conf" > /dev/null
-        fi
-        ok "Installed: $cdest/visibox.conf"
-
-        echo ""
-        info "VisiBox requires ./bin/visibox relative to working directory."
-        info "Create symlink in your working directory:"
-        info "  mkdir -p bin config"
-        info "  ln -sf $vdest/visibox bin/visibox"
-        info "  ln -sf $cdest/visibox.conf config/visibox.conf"
+        mkdir -p "$DEST_VB_BIN"
+        cp "$VISIBOX_SRC" "$DEST_VB_BIN/visibox"
+        chmod +x "$DEST_VB_BIN/visibox"
+        ok "Installed: $DEST_VB_BIN/visibox"
     fi
 
-    # Write .env to home
+    # --- 3. Copy config ---
+    mkdir -p "$DEST_VB_CFG"
+    if [ -n "${VISIBOX_CONF_SRC:-}" ] && [ -f "$VISIBOX_CONF_SRC" ]; then
+        cp "$VISIBOX_CONF_SRC" "$DEST_VB_CFG/visibox.conf"
+    elif [ ! -f "$DEST_VB_CFG/visibox.conf" ]; then
+        printf '# VisiBox Configuration\nMAX_OUTPUT_BYTES=65536\nMAX_OUTPUT_LINES=500\nCOMMAND_TIMEOUT=30\nWORKING_DIR=.\n' \
+            > "$DEST_VB_CFG/visibox.conf"
+    fi
+    ok "Installed: $DEST_VB_CFG/visibox.conf"
+
+    # --- 4. Write .env to ~/.asm-agent.env ---
     write_env_file
 
+    # --- 5. Create asm-agent-run wrapper ---
+    cat > "$DEST_BIN/asm-agent-run" << WRAPPER_EOF
+#!/usr/bin/env bash
+# asm-agent-run — auto-sources ~/.asm-agent.env, sets up visibox symlinks
+# Generated by install.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ)
+[ -f "\$HOME/.asm-agent.env" ] && source "\$HOME/.asm-agent.env"
+VB_BIN="$DEST_VB_BIN/visibox"
+VB_CFG="$DEST_VB_CFG/visibox.conf"
+if [ ! -f "./bin/visibox" ] && [ -f "\$VB_BIN" ]; then
+    mkdir -p bin config
+    ln -sf "\$VB_BIN" ./bin/visibox
+    ln -sf "\$VB_CFG" ./config/visibox.conf
+fi
+exec "$DEST_BIN/asm-agent" "\$@"
+WRAPPER_EOF
+    chmod +x "$DEST_BIN/asm-agent-run"
+    ok "Installed: $DEST_BIN/asm-agent-run (wrapper)"
+
+    # --- 6. Print quick start ---
     echo ""
     echo -e "${BOLD}  ── Quick Start ─────────────────────────────${NC}"
     echo ""
     if [ -f "${HOME}/.asm-agent.env" ]; then
-        echo -e "  ${GREEN}source${NC} ~/.asm-agent.env"
-        echo -e "  mkdir -p bin && ln -sf $vdest/visibox bin/visibox"
-        echo -e "  asm-agent ${GREEN}\"your task here\"${NC}"
+        echo -e "  ${GREEN}asm-agent-run${NC} ${GREEN}\"your task here\"${NC}"
+        echo -e "  ${DIM}(auto-sources ~/.asm-agent.env + sets up visibox symlinks)${NC}"
     else
         echo -e "  ${GREEN}export${NC} ASM_AGENT_API_KEY=sk-your-key"
-        echo -e "  asm-agent ${GREEN}\"your task here\"${NC}"
+        echo -e "  ${GREEN}asm-agent-run${NC} ${GREEN}\"your task here\"${NC}"
     fi
     echo ""
 }
@@ -536,7 +494,7 @@ main() {
         download_prebuilt
     fi
 
-    # Step 3: Install files + write .env
+    # Step 3: Install files + write .env + create wrapper
     install_binary
 
     echo -e "${BOLD}"

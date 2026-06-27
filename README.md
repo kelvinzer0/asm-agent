@@ -13,22 +13,18 @@ ASM-AGENT is a zero-dependency, statically-linked Linux binary that implements a
 curl -sSL https://raw.githubusercontent.com/kelvinzer0/asm-agent/master/install.sh | bash
 ```
 
-The installer will prompt you for:
-- **API key** (hidden input, stored in `.env` with `chmod 600`)
+Installs to `/usr/local/bin/` by default. The installer will prompt you for:
+- **API key** (hidden input, stored in `~/.asm-agent.env` with `chmod 600`)
 - **API endpoint URL** (default: Cloudflare Workers AI)
 - **Model name** (default: LLaMA 3.1 8B FP8)
 
-After install, use the wrapper (auto-sources `.env`):
+After install:
 
 ```bash
-./run.sh "List all files in /tmp and summarize them"
+asm-agent-run "List all files in /tmp and summarize them"
 ```
 
-Or manually:
-```bash
-source .env
-./asm-agent "your task"
-```
+`asm-agent-run` auto-sources `~/.asm-agent.env` and sets up visibox symlinks in your working directory.
 
 ### Non-interactive install
 
@@ -38,13 +34,17 @@ curl -sSL https://raw.githubusercontent.com/kelvinzer0/asm-agent/master/install.
 
 ```bash
 # Full options (--api-url auto-appends /chat/completions if missing)
-bash install.sh --api-key=sk-xxx --api-url=https://api.openai.com/v1 --model=gpt-4o
+curl -sSL https://raw.githubusercontent.com/kelvinzer0/asm-agent/master/install.sh | bash -s -- \
+  --api-key=sk-xxx \
+  --api-url=https://api.openai.com/v1 \
+  --model=gpt-4o
 ```
 
-### Install to system path
+### Custom prefix
 
 ```bash
-bash install.sh --prefix=/usr/local
+bash install.sh --prefix=/opt
+# Installs to /opt/bin/asm-agent, /opt/lib/asm-agent/...
 ```
 
 ### Build from source
@@ -60,14 +60,15 @@ make
 ## Usage
 
 ```bash
-# Interactive mode
-./asm-agent
+# Interactive mode (auto-sources ~/.asm-agent.env)
+asm-agent-run
 
 # Single task
-./asm-agent "Create a Python script that prints hello world"
+asm-agent-run "Create a Python script that prints hello world"
 
-# With custom API provider
-ASM_AGENT_API_KEY=sk-xxx ./asm-agent "your task"
+# Direct binary (env vars must be set manually)
+source ~/.asm-agent.env
+asm-agent "your task"
 ```
 
 ## Environment Variables
@@ -79,7 +80,7 @@ ASM_AGENT_API_KEY=sk-xxx ./asm-agent "your task"
 | `ASM_AGENT_API_URL` | No | Override API endpoint URL |
 | `ASM_AGENT_MODEL` | No | Override model name |
 
-> One of the two API key variables is required. URL and model fall back to compiled-in defaults if not set. The installer writes these to a `.env` file for you.
+> One of the two API key variables is required. URL and model fall back to compiled-in defaults if not set. The installer writes these to `~/.asm-agent.env` for you.
 
 **Examples:**
 ```bash
@@ -87,14 +88,14 @@ ASM_AGENT_API_KEY=sk-xxx ./asm-agent "your task"
 export ASM_AGENT_API_KEY="sk-..."
 export ASM_AGENT_API_URL="https://api.openai.com/v1/chat/completions"
 export ASM_AGENT_MODEL="gpt-4o"
-./asm-agent "your task"
+asm-agent "your task"
 
 # Or via installer (one-liner) — URL auto-appends /chat/completions
 curl -sSL https://raw.githubusercontent.com/kelvinzer0/asm-agent/master/install.sh | bash -s -- \
   --api-key=sk-xxx \
   --api-url=https://api.openai.com/v1 \
   --model=gpt-4o
-./run.sh "your task"
+asm-agent-run "your task"
 ```
 
 ## Features
@@ -216,6 +217,17 @@ Mode switching is triggered by `HANDOFF: <MODE>` in the LLM response.
 - **Runtime**: Linux x86-64, curl
 - **VisiBox**: v0.3.0 (bundled with installer and release tarball)
 - **Build** (from source only): NASM ≥ 2.15, binutils (ld), make
+- **Install**: write permission to `${PREFIX}/bin` and `${PREFIX}/lib/` (default: `/usr/local`)
+
+## Installed Files
+
+| Path | Description |
+|------|-------------|
+| `/usr/local/bin/asm-agent` | Main binary |
+| `/usr/local/bin/asm-agent-run` | Wrapper (auto-sources env, sets up visibox) |
+| `/usr/local/lib/asm-agent/bin/visibox` | VisiBox execution engine |
+| `/usr/local/lib/asm-agent/config/visibox.conf` | VisiBox configuration |
+| `~/.asm-agent.env` | API key, URL, model (chmod 600) |
 
 ## License
 
