@@ -71,8 +71,26 @@ ASM_AGENT_API_KEY=sk-xxx ./asm-agent "your task"
 |----------|----------|-------------|
 | `ASM_AGENT_API_KEY` | **Yes** | API key (checked first) |
 | `OPENAI_API_KEY` | **Yes** | Fallback API key (used if `ASM_AGENT_API_KEY` not set) |
+| `ASM_AGENT_API_URL` | No | Override API endpoint URL |
+| `ASM_AGENT_MODEL` | No | Override model name |
 
-> One of the two API key variables is required. The installer writes these to a `.env` file for you.
+> One of the two API key variables is required. URL and model fall back to compiled-in defaults if not set. The installer writes these to a `.env` file for you.
+
+**Examples:**
+```bash
+# Use OpenAI
+export ASM_AGENT_API_KEY="sk-..."
+export ASM_AGENT_API_URL="https://api.openai.com/v1/chat/completions"
+export ASM_AGENT_MODEL="gpt-4o"
+./asm-agent "your task"
+
+# Or via installer (one-liner)
+curl -sSL https://raw.githubusercontent.com/kelvinzer0/asm-agent/master/install.sh | bash -s -- \
+  --api-key=sk-xxx \
+  --api-url=https://api.openai.com/v1/chat/completions \
+  --model=gpt-4o
+source .env && ./asm-agent "your task"
+```
 
 ## Features
 
