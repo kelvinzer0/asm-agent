@@ -40,6 +40,7 @@ extern exec_command
 extern exec_command_visibox
 extern check_blocked
 extern call_api
+extern resolve_runtime_config
 
 ; --- VisiBox tool handlers (modular) ---
 extern tool_exec_handler
@@ -280,6 +281,7 @@ global successful_exec_count
 global cwd_buf, cwd_len
 global page_buf, page_total_len, page_offset, page_chunk_num, page_active
 global visibox_json_buf, visibox_pipe_fds, visibox_resp_pipe_fds, visibox_response_raw, visibox_resp_len, use_visibox
+global runtime_api_url, runtime_model
 
 response_buf    resb RESPONSE_BUF_SZ
 command_buf     resb COMMAND_BUF_SZ
@@ -326,6 +328,10 @@ visibox_response_raw   resb OUTPUT_BUF_SZ         ; raw JSON response from visib
 visibox_resp_len       resq 1                     ; bytes read from visibox response
 use_visibox            resb 1                     ; 1 = visibox available (always 1 if we reach here)
 
+; Runtime config overrides (from env vars — empty = use compiled-in default)
+runtime_api_url        resb 512                    ; ASM_AGENT_API_URL override
+runtime_model          resb 256                    ; ASM_AGENT_MODEL override
+
 ; ============================================================================
 ; .text — Main program
 ; ============================================================================
@@ -355,6 +361,9 @@ _start:
     mov     dword [think_streak], 0
     mov     dword [parse_error_streak], 0
     mov     dword [successful_exec_count], 0
+
+    ; Resolve runtime config from env vars (API URL, model)
+    call    resolve_runtime_config
 
     ; Initialize musical orchestration
     call    conductor_init

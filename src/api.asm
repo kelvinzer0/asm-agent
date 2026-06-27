@@ -18,6 +18,8 @@ extern response_len         ; qword — actual bytes received
 extern pipe_fds             ; 2 × dword (8 bytes) — pipe read/write fds
 extern wait_status          ; dword — waitpid status word
 extern saved_envp           ; qword — pointer to envp array (saved from main)
+extern runtime_api_url      ; 512 bytes — ASM_AGENT_API_URL override (empty = use default)
+extern runtime_model        ; 256 bytes — ASM_AGENT_MODEL override (empty = use default)
 
 ; ---------------------------------------------------------------------------
 ; External functions
@@ -31,6 +33,7 @@ extern str_starts_with      ; str_starts_with(rdi=str, rsi=prefix) -> rax
 ; Public API
 ; ---------------------------------------------------------------------------
 global call_api
+global resolve_runtime_config
 
 ; ============================================================================
 ;                         READ-ONLY DATA
@@ -45,6 +48,8 @@ curl_data_arg:      db '@/tmp/.asm_agent_payload.json', 0
 
 env_asm_key_prefix: db 'ASM_AGENT_API_KEY=', 0
 env_openai_key_prefix: db 'OPENAI_API_KEY=', 0
+env_api_url_prefix: db 'ASM_AGENT_API_URL=', 0
+env_model_prefix: db 'ASM_AGENT_MODEL=', 0
 missing_api_key_msg: db 'Missing API key. Set ASM_AGENT_API_KEY or OPENAI_API_KEY in the environment.', 10, 0
 
 section .bss
@@ -211,7 +216,14 @@ call_api:
     lea     rax, [rel curl_header]
     push    rax                         ; argv[5]
 
+    ; argv[4] = API URL — use runtime override if set, else compiled-in default
+    cmp     byte [rel runtime_api_url], 0
+    jne     .use_runtime_url
     lea     rax, [rel api_url]
+    jmp     .url_done
+.use_runtime_url:
+    lea     rax, [rel runtime_api_url]
+.url_done:
     push    rax                         ; argv[4]
 
     lea     rax, [rel curl_post_val]
@@ -406,6 +418,88 @@ build_auth_header:
     xor     rax, rax
 
 .done:
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
+; ============================================================================
+; resolve_runtime_config — Scan envp for ASM_AGENT_API_URL and ASM_AGENT_MODEL
+; ----------------------------------------------------------------------------
+; Copies values to runtime_api_url and runtime_model BSS buffers if found.
+; If not found, buffers remain zeroed (caller uses compiled-in defaults).
+;
+; This is called once at startup before any API calls.
+; ============================================================================
+resolve_runtime_config:
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+
+    mov     rbx, [rel saved_envp]
+    test    rbx, rbx
+    jz      .rc_done
+
+    ; --- Scan for ASM_AGENT_API_URL ---
+.rc_scan_url:
+    mov     r12, [rbx]
+    test    r12, r12
+    jz      .rc_scan_model_start
+
+    mov     rdi, r12
+    lea     rsi, [rel env_api_url_prefix]
+    call    str_starts_with
+    test    rax, rax
+    jnz     .rc_found_url
+
+    add     rbx, 8
+    jmp     .rc_scan_url
+
+.rc_scan_model_start:
+    mov     rbx, [rel saved_envp]
+
+    ; --- Scan for ASM_AGENT_MODEL ---
+.rc_scan_model:
+    mov     r12, [rbx]
+    test    r12, r12
+    jz      .rc_done
+
+    mov     rdi, r12
+    lea     rsi, [rel env_model_prefix]
+    call    str_starts_with
+    test    rax, rax
+    jnz     .rc_found_model
+
+    ; Also check for URL while we're scanning (might have missed it)
+    mov     rdi, r12
+    lea     rsi, [rel env_api_url_prefix]
+    call    str_starts_with
+    test    rax, rax
+    jnz     .rc_found_url
+
+    add     rbx, 8
+    jmp     .rc_scan_model
+
+.rc_found_url:
+    ; r12 points to "ASM_AGENT_API_URL=<value>"
+    lea     rdi, [rel env_api_url_prefix]
+    call    str_len
+    lea     rsi, [r12 + rax]         ; rsi = pointer to value after '='
+    lea     rdi, [rel runtime_api_url]
+    call    str_copy                 ; copy value to runtime_api_url
+    jmp     .rc_scan_model_start     ; continue scanning for model
+
+.rc_found_model:
+    ; r12 points to "ASM_AGENT_MODEL=<value>"
+    lea     rdi, [rel env_model_prefix]
+    call    str_len
+    lea     rsi, [r12 + rax]         ; rsi = pointer to value after '='
+    lea     rdi, [rel runtime_model]
+    call    str_copy                 ; copy value to runtime_model
+
+.rc_done:
+    pop     r14
     pop     r13
     pop     r12
     pop     rbx

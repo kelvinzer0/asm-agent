@@ -41,6 +41,7 @@ extern str_len                  ; rdi=str -> rax=length
 extern str_copy                 ; rdi=dst, rsi=src -> rax=bytes copied
 extern str_concat               ; rdi=dst, rsi=src -> rax=total length
 extern str_escape_json          ; rdi=dst, rsi=src, rdx=max_out -> rax=bytes written
+extern runtime_model            ; 256 bytes — ASM_AGENT_MODEL override (empty = use default)
 
 ; ---------------------------------------------------------------------------
 ; Export
@@ -129,10 +130,17 @@ build_payload:
     call    copy_literal
 
     ; ---------------------------------------------------------------
-    ; Part 2: model name (literal, no escaping needed — it's ASCII)
+    ; Part 2: model name — use runtime override if set, else compiled-in default
     ; ---------------------------------------------------------------
+    cmp     byte [rel runtime_model], 0
+    jne     .use_runtime_model
     lea     rdi, [rel model_name]
     call    copy_literal
+    jmp     .model_done
+.use_runtime_model:
+    lea     rdi, [rel runtime_model]
+    call    copy_literal
+.model_done:
 
     ; ---------------------------------------------------------------
     ; Part 3: ","messages":[{"role":"system","content":"
