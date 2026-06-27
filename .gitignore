@@ -1,3 +1,5 @@
 *.o
 asm-agent
 bin/
+.env
+*.env
