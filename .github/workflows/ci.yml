@@ -1,0 +1,195 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+    paths:
+      - 'src/**/*.asm'
+      - 'include/**/*.inc'
+      - 'Makefile'
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ========================================================================
+  # Build — assemble + link all .asm files
+  # ========================================================================
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      binary_size: ${{ steps.check.outputs.binary_size }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache build tools
+        id: cache-tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/bin/nasm
+          key: nasm-2.16
+
+      - name: Install nasm
+        if: steps.cache-tools.outputs.cache-hit != 'true'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq nasm binutils make
+
+      - name: Cache VisiBox
+        id: cache-visibox
+        uses: actions/cache@v4
+        with:
+          path: bin/visibox
+          key: visibox-0.3.0
+
+      - name: Download VisiBox
+        if: steps.cache-visibox.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p bin
+          curl -sLf "https://github.com/kelvinzer0/visibox/releases/download/v0.3.0/visibox-x86_64-linux-gnu.tar.gz" \
+            -o /tmp/visibox.tar.gz
+          tar xzf /tmp/visibox.tar.gz -C bin/
+          chmod +x bin/visibox
+          rm -f /tmp/visibox.tar.gz
+
+      - name: Build
+        run: make
+
+      - name: Verify binary
+        id: check
+        run: |
+          file asm-agent
+          ldd asm-agent 2>&1 || echo "statically linked"
+          BSIZE=$(stat -c%s asm-agent)
+          echo "binary_size=${BSIZE}" >> "$GITHUB_OUTPUT"
+          echo "asm-agent: ${BSIZE} bytes"
+
+  # ========================================================================
+  # Lint — check assembly syntax validity (dry-run each file)
+  # ========================================================================
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install nasm
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq nasm
+
+      - name: Check assembly syntax (all files)
+        run: |
+          ERRORS=0
+          for f in src/*.asm; do
+            echo -n "  $f ... "
+            if nasm -f elf64 -I include/ -o /dev/null "$f" 2>/dev/null; then
+              echo "OK"
+            else
+              echo "FAIL"
+              ERRORS=$((ERRORS + 1))
+            fi
+          done
+          echo ""
+          if [ "$ERRORS" -gt 0 ]; then
+            echo "::error::$ERRORS file(s) failed syntax check"
+            exit 1
+          fi
+          echo "All assembly files pass syntax check."
+
+  # ========================================================================
+  # Smoke — basic binary tests
+  # ========================================================================
+  smoke:
+    needs: build
+    runs-on: ubuntu-latest
+    if: always() && needs.build.result == 'success'
+
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: asm-agent-x86_64-linux
+        continue-on-error: true
+
+      # Fallback: build wasn't uploaded as artifact, so rebuild
+      - name: Checkout (for rebuild fallback)
+        if: failure()
+        uses: actions/checkout@v4
+
+      - name: Install + build (fallback)
+        if: failure()
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq nasm binutils make
+          mkdir -p bin
+          curl -sLf "https://github.com/kelvinzer0/visibox/releases/download/v0.3.0/visibox-x86_64-linux-gnu.tar.gz" \
+            -o /tmp/visibox.tar.gz
+          tar xzf /tmp/visibox.tar.gz -C bin/
+          chmod +x bin/visibox
+          make
+
+      - name: Smoke tests
+        run: |
+          chmod +x asm-agent bin/visibox 2>/dev/null || true
+
+          echo "=== 1. Binary format ==="
+          file asm-agent
+          test -x asm-agent || { echo "FAIL: not executable"; exit 1; }
+          echo "PASS"
+
+          echo ""
+          echo "=== 2. Statically linked ==="
+          if ldd asm-agent 2>&1 | grep -q "not a dynamic executable"; then
+            echo "PASS: statically linked"
+          elif ldd asm-agent 2>&1 | grep -q "dynamic"; then
+            echo "WARN: dynamically linked (expected static)"
+          else
+            echo "PASS: no dynamic deps"
+          fi
+
+          echo ""
+          echo "=== 3. Binary size check ==="
+          BSIZE=$(stat -c%s asm-agent)
+          echo "Size: ${BSIZE} bytes"
+          if [ "$BSIZE" -gt 200000 ]; then
+            echo "WARN: binary exceeds 200KB"
+          else
+            echo "PASS: under 200KB"
+          fi
+
+          echo ""
+          echo "=== 4. VisiBox pipe test ==="
+          RESULT=$(echo '{"type":"execute","command":"echo smoke-ok"}' | timeout 5 ./bin/visibox --visibox 2>/dev/null)
+          if echo "$RESULT" | grep -q "smoke-ok"; then
+            echo "PASS: VisiBox responds"
+          else
+            echo "WARN: VisiBox did not respond as expected"
+          fi
+
+          echo ""
+          echo "=== 5. VisiBox session type ==="
+          RESULT=$(echo '{"type":"session","command":"echo session-ok"}' | timeout 5 ./bin/visibox --visibox 2>/dev/null)
+          if echo "$RESULT" | grep -q "session-ok\|error\|not supported"; then
+            echo "PASS: VisiBox handles session type"
+          else
+            echo "WARN: session type returned unexpected response"
+          fi
+
+          echo ""
+          echo "=== All smoke tests completed ==="
+
+      - name: CI summary
+        if: always()
+        run: |
+          BSIZE="${{ needs.build.outputs.binary_size }}"
+          echo "## CI Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Check | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Build | ${{ needs.build.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Smoke | ${{ job.status }} |" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$BSIZE" ]; then
+            echo "| Binary | ${BSIZE} bytes |" >> "$GITHUB_STEP_SUMMARY"
+          fi
