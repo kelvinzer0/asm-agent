@@ -137,14 +137,15 @@ make visibox-clean  # Remove VisiBox binary only
 
 ## Tools
 
-ASM-AGENT defines tools in its system prompt:
+ASM-AGENT defines 4 VisiBox tools in its system prompt:
 
-| Tool | Description |
-|------|-------------|
-| `run_command` | Execute shell commands with structured JSON output (VisiBox) or raw output (sh) |
-| `task_complete` | Signal that the task is done with a summary |
-
-> **Note:** `github_search` and `github_read` are listed in the system prompt as future tools. The LLM can simulate them by running `curl` commands via `run_command` (e.g., `curl -s https://api.github.com/search/...`).
+| Tool | Prefix | Description |
+|------|--------|-------------|
+| `EXEC` | `EXEC: <cmd>` or `<tool_call>` tags | Execute shell commands with structured JSON output (VisiBox) or raw output (sh) |
+| `FETCH_PAGE` | `FETCH_PAGE:` | Get next page of truncated command output (cursor-based pagination) |
+| `SEARCH` | `SEARCH: <keyword>` | Jump to the page of last output containing a keyword |
+| `SESSION` | `SESSION: <cmd>` | Run command in persistent shell (cd, env, alias preserved across calls) |
+| `DONE` | `DONE: <summary>` | Signal that the task is done with a summary |
 
 ### Command Execution
 
@@ -185,9 +186,14 @@ Mode switching is triggered by `HANDOFF: <MODE>` in the LLM response.
 
 | File | Description |
 |------|-------------|
-| `src/main.asm` | Entry point, TUI, agent loop |
-| `src/parser.asm` | Response parsing (EXEC/THINK/DONE/NEXT_PAGE) |
-| `src/executor.asm` | Command execution (VisiBox + sh fallback) |
+| `src/main.asm` | Entry point, TUI, agent loop, tool dispatch |
+| `src/parser.asm` | Response parsing (EXEC/THINK/DONE/FETCH_PAGE/SEARCH/SESSION) |
+| `src/executor.asm` | Command safety filter (check_blocked) + sh fallback |
+| `src/visibox_client.asm` | Shared VisiBox JSON protocol layer (send/recv, parse, build) |
+| `src/tool_exec.asm` | EXEC tool handler (execute via VisiBox) |
+| `src/tool_fetch_page.asm` | FETCH_PAGE tool handler (cursor-based pagination) |
+| `src/tool_search.asm` | SEARCH tool handler (keyword search_jump) |
+| `src/tool_session.asm` | SESSION tool handler (persistent shell via VisiBox daemon) |
 | `src/api.asm` | HTTP API calls via curl, JSON payload building |
 | `src/conductor.asm` | Musical tempo/dynamics modulation, orchestration |
 | `src/json.asm` | JSON construction helpers |
