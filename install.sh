@@ -158,6 +158,42 @@ DEST_LIB="$PREFIX/lib/asm-agent"
 DEST_VB_BIN="$DEST_LIB/bin"
 DEST_VB_CFG="$DEST_LIB/config"
 
+# --- Permission check: auto-fallback to ~/.local if PREFIX not writable ---
+if [ ! -w "$PREFIX" ] 2>/dev/null; then
+    FALLBACK_PREFIX="$HOME/.local"
+    warn "Cannot write to $PREFIX (no permission)"
+    info "Falling back to $FALLBACK_PREFIX"
+    PREFIX="$FALLBACK_PREFIX"
+    DEST_BIN="$PREFIX/bin"
+    DEST_LIB="$PREFIX/lib/asm-agent"
+    DEST_VB_BIN="$DEST_LIB/bin"
+    DEST_VB_CFG="$DEST_LIB/config"
+fi
+
+ensure_path() {
+    local bin_dir="$DEST_BIN"
+    case ":${PATH}:" in
+        *":$bin_dir:"*) return ;;
+    esac
+    local rc_file=""
+    for f in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+        if [ -f "$f" ] && [ -w "$f" ]; then
+            rc_file="$f"
+            break
+        fi
+    done
+    if [ -n "$rc_file" ]; then
+        echo '' >> "$rc_file"
+        echo '# Added by asm-agent installer' >> "$rc_file"
+        echo "export PATH=\"$bin_dir:\$PATH\"" >> "$rc_file"
+        info "Added $bin_dir to PATH via $rc_file"
+        export PATH="$bin_dir:$PATH"
+    else
+        warn "$bin_dir is not in your PATH. Add it manually:"
+        warn "  export PATH=\"$bin_dir:\$PATH\""
+    fi
+}
+
 echo -e "${BOLD}"
 echo "  ╔═══════════════════════════════════════╗"
 printf "  ║       ASM-AGENT Installer v%-13s║\n" "${VERSION}"
@@ -180,6 +216,9 @@ if ! check_cmd curl; then
     fail "curl is required. Install it first: sudo apt install curl"
 fi
 ok "curl available"
+
+# Ensure DEST_BIN is in PATH
+ensure_path
 
 # ============================================================================
 # Interactive Configuration
@@ -470,6 +509,14 @@ WRAPPER_EOF
         echo -e "  ${GREEN}export${NC} ASM_AGENT_API_KEY=sk-your-key"
         echo -e "  ${GREEN}asm-agent-run${NC} ${GREEN}\"your task here\"${NC}"
     fi
+    case ":${PATH}:" in
+        *":$DEST_BIN:"*) ;;
+        *)
+            echo -e "  ${YELLOW}NOTE${NC}: $DEST_BIN is not in your PATH yet."
+            echo -e "  Run:  ${GREEN}source ~/.bashrc${NC}  (or open a new terminal)"
+            echo -e "  Or:   ${GREEN}export PATH=\"$DEST_BIN:\$PATH\"${NC}"
+            ;;
+    esac
     echo ""
 }
 
