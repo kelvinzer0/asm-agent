@@ -77,7 +77,7 @@ devnull_path     db '/dev/null', 0
 ; --- VisiBox JSON parsing anchors (unique to executor, shared ones in config.inc) ---
 vb_quote_char      db '"', 0               ; 1 byte  — opening quote of string value
 vb_key_duration    db '"duration_ms":', 0
-vb_type_error      db '"execute_error"', 0
+vb_exec_error_msg  db '"execute_error"', 0
 
 ; ============================================================================
 ;                            CODE
@@ -551,7 +551,7 @@ exec_command_visibox:
     ; Found "error" key — this is an error response from visibox
     ; Set output to error message and exit code to 1
     lea     rdi, [rel output_buf]
-    lea     rsi, [rel vb_type_error]
+    lea     rsi, [rel vb_exec_error_msg]
     mov     ecx, 17
     cld
     rep     movsb
