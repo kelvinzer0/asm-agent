@@ -68,6 +68,14 @@ jobs:
           echo "binary_size=${BSIZE}" >> "$GITHUB_OUTPUT"
           echo "asm-agent: ${BSIZE} bytes"
 
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: asm-agent-x86_64-linux
+          path: |
+            asm-agent
+            bin/visibox
+
   # ========================================================================
   # Lint — check assembly syntax validity (dry-run each file)
   # ========================================================================
@@ -113,27 +121,10 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: asm-agent-x86_64-linux
-        continue-on-error: true
-
-      # Fallback: build wasn't uploaded as artifact, so rebuild
-      - name: Checkout (for rebuild fallback)
-        if: failure()
-        uses: actions/checkout@v4
-
-      - name: Install + build (fallback)
-        if: failure()
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq nasm binutils make
-          mkdir -p bin
-          curl -sLf "https://github.com/kelvinzer0/visibox/releases/download/v0.3.0/visibox-x86_64-linux-gnu.tar.gz" \
-            -o /tmp/visibox.tar.gz
-          tar xzf /tmp/visibox.tar.gz -C bin/
-          chmod +x bin/visibox
-          make
 
       - name: Smoke tests
         run: |
-          chmod +x asm-agent bin/visibox 2>/dev/null || true
+          chmod +x asm-agent bin/visibox
 
           echo "=== 1. Binary format ==="
           file asm-agent
