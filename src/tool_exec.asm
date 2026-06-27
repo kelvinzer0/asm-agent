@@ -1,7 +1,7 @@
 ; ============================================================================
-; tool_exec.asm — Execute Tool (VisiBox enhanced)
+; tool_exec.asm — Execute Tool (VisiBox ONLY — no fallback)
 ; ============================================================================
-; Uses visibox_client for JSON protocol. Falls back to /bin/sh.
+; Uses visibox_client for JSON protocol. VisiBox is REQUIRED.
 ;
 ; Args:    none (reads command_buf)
 ; Returns:  eax = exit code
@@ -15,7 +15,6 @@
 extern command_buf
 extern output_buf
 extern output_len
-extern use_visibox
 extern visibox_response_raw
 extern saved_envp
 extern wait_status
@@ -33,7 +32,6 @@ extern vb_get_response_id
 extern vb_get_cursor
 extern vb_get_has_next
 extern check_blocked
-extern exec_command_fallback
 
 global tool_exec_handler
 
@@ -49,10 +47,6 @@ tool_exec_handler:
     call    check_blocked
     test    eax, eax
     jnz     .blocked
-
-    ; --- Check visibox available ---
-    cmp     byte [rel use_visibox], 1
-    jne     .use_fallback
 
     ; 1. Build JSON with options (output_limit, line_numbers)
     call    vb_build_execute
@@ -83,6 +77,15 @@ tool_exec_handler:
     call    vb_extract_string
     mov     [rel output_len], r14
 
+    ; 4b. If output is empty, add hint so the model understands
+    test    r14, r14
+    jnz     .has_output
+    lea     rdi, [rel output_buf]
+    lea     rsi, [rel vb_empty_output]
+    call    str_copy
+    mov     [rel output_len], rax
+.has_output:
+
     ; 5. Extract exit_code
     lea     rdi, [rel vb_key_exit_code]
     call    vb_parse_int
@@ -95,11 +98,12 @@ tool_exec_handler:
     jmp     .done
 
 .visibox_failed:
-    mov     byte [rel use_visibox], 0
-    ; Fall through
-
-.use_fallback:
-    call    exec_command_fallback
+    ; VisiBox pipe/fork failed — report as error
+    lea     rdi, [rel output_buf]
+    lea     rsi, [rel vb_type_error]
+    call    str_copy
+    mov     [rel output_len], rax
+    mov     eax, 1
     jmp     .done
 
 .blocked:

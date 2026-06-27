@@ -105,7 +105,9 @@ jobs:
 
       - name: Package tarball
         run: |
-          tar czf "asm-agent-x86_64-linux.tar.gz" asm-agent bin/visibox
+          mkdir -p config
+          printf '# VisiBox Configuration\nMAX_OUTPUT_BYTES=65536\nMAX_OUTPUT_LINES=500\nCOMMAND_TIMEOUT=30\nWORKING_DIR=.\n' > config/visibox.conf
+          tar czf "asm-agent-x86_64-linux.tar.gz" asm-agent bin/visibox config/visibox.conf
           sha256sum asm-agent-x86_64-linux.tar.gz > asm-agent-x86_64-linux.tar.gz.sha256
           echo "Package contents:"
           tar tzf asm-agent-x86_64-linux.tar.gz

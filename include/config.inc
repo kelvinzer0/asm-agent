@@ -53,10 +53,9 @@ system_prompt_end:
 
 ; --- Binary paths ---
 curl_path       db '/usr/bin/curl', 0
-shell_path      db '/bin/sh', 0
-sh_flag         db '-c', 0
 visibox_path    db './bin/visibox', 0        ; VisiBox binary (local, bundled with build)
 visibox_flag    db '--visibox', 0             ; Flag to activate VisiBox pipe mode
+visibox_norc    db '--norc', 0                ; Skip bash rc files (clean output)
 
 ; --- VisiBox JSON Protocol Templates ---
 ; Request template: {"type":"execute","command":"<CMD>"}
@@ -75,6 +74,8 @@ vb_key_response_id   db '"response_id":', 0
 vb_key_type          db '"type":', 0
 vb_key_err           db '"error":', 0
 vb_type_error        db 'VisiBox error', 0
+vb_empty_output      db '(no stdout output)', 0
+vb_required_msg      db 'ERROR: VisiBox not found at ./bin/visibox — cannot continue.', 10, 0
 
 curl_silent     db '-sS', 0
 curl_post       db '-X', 0

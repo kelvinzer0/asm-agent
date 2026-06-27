@@ -15,7 +15,6 @@
 
 extern output_buf
 extern output_len
-extern use_visibox
 extern visibox_response_raw
 extern vb_saved_response_id
 extern vb_saved_cursor
@@ -43,9 +42,6 @@ tool_fetch_page_handler:
     push    rbp
     mov     rbp, rsp
     push    rbx
-
-    cmp     byte [rel use_visibox], 1
-    jne     .no_visibox
 
     ; Check if we have a cursor
     cmp     byte [rel vb_saved_cursor], 0

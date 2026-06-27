@@ -32,7 +32,6 @@ extern visibox_pipe_fds
 extern visibox_resp_pipe_fds
 extern visibox_response_raw
 extern visibox_resp_len
-extern use_visibox
 extern output_buf
 extern output_len
 extern command_buf
@@ -716,10 +715,12 @@ vb_send_recv:
     mov     eax, SYS_CLOSE
     syscall
 
-    ; execve(visibox_path, [path, "--visibox", NULL], envp)
+    ; execve(visibox_path, [path, "--norc", "--visibox", NULL], envp)
     xor     eax, eax
     push    rax
     lea     rax, [rel visibox_flag]
+    push    rax
+    lea     rax, [rel visibox_norc]
     push    rax
     lea     rax, [rel visibox_path]
     push    rax

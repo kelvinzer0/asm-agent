@@ -38,7 +38,6 @@ extern build_payload
 extern parse_response
 extern exec_command
 extern exec_command_visibox
-extern exec_command_fallback
 extern check_blocked
 extern call_api
 
@@ -259,8 +258,6 @@ wl_page_bytes   db ' bytes. Reply NEXT_PAGE to see more.', 10, 0
 wl_page_last    db '[PAGINATED] Last page shown. All output delivered.', 10, 0
 
 wl_label_page   db 'OUTPUT (page)', 0
-no_vb_search_msg db 'SEARCH is only available with VisiBox. Use FETCH_PAGE or NEXT_PAGE instead.', 0
-no_vb_session_msg db 'SESSION is only available with VisiBox. Using EXEC instead (state not persisted).', 0
 wl_vb_more_hint db 'More pages available. Reply FETCH_PAGE to continue.', 10, 0
 
 ; Delay timespec (2 seconds)
@@ -327,7 +324,7 @@ visibox_pipe_fds       resd 2                     ; pipe fds for visibox stdin
 visibox_resp_pipe_fds  resd 2                     ; pipe fds for visibox stdout
 visibox_response_raw   resb OUTPUT_BUF_SZ         ; raw JSON response from visibox
 visibox_resp_len       resq 1                     ; bytes read from visibox response
-use_visibox            resb 1                     ; 1 = use visibox, 0 = fallback to /bin/sh
+use_visibox            resb 1                     ; 1 = visibox available (always 1 if we reach here)
 
 ; ============================================================================
 ; .text — Main program
@@ -367,18 +364,23 @@ _start:
     ; Initialize Swarm/LangGraph orchestration
     call    orchestration_init
 
-    ; --- Auto-detect VisiBox binary ---
+    ; --- Auto-detect VisiBox binary (REQUIRED — no fallback) ---
     ; access(visibox_path, F_OK) — check if the binary exists and is executable
     lea     rdi, [rel visibox_path]
     mov     rax, SYS_ACCESS
     mov     rsi, 1                ; X_OK = 1 (check execute permission)
     syscall
     test    rax, rax
-    jnz     .no_visibox           ; not found / not executable → use /bin/sh
+    jnz     .visibox_missing
     mov     byte [rel use_visibox], 1
     jmp     .visibox_detect_done
-.no_visibox:
-    mov     byte [rel use_visibox], 0
+.visibox_missing:
+    ; VisiBox is required — print error and exit
+    PRINT   STDERR, vb_required_msg
+    mov     rax, 1
+    mov     rdi, rax
+    mov     rax, SYS_EXIT
+    syscall
 .visibox_detect_done:
 
     ; --- Capture working directory via getcwd syscall ---
@@ -820,16 +822,13 @@ _start:
 ; This is different from NEXT_PAGE which uses local page_buf pagination.
 ; ============================================================================
 .handle_fetch_page:
-    ; --- Try VisiBox cursor pagination first ---
-    cmp     byte [rel use_visibox], 1
-    jne     .fetch_fallback_local
-
+    ; --- VisiBox cursor-based pagination ---
     ; Check if VisiBox has a cursor (has_next from last execute)
     cmp     byte [rel vb_saved_has_next], 1
     je      .fetch_vb_do
 
     ; No VisiBox cursor — fall through to local pagination
-.fetch_fallback_local:
+.fetch_no_cursor:
     ; Delegate to NEXT_PAGE handler (local page_buf pagination)
     jmp     .handle_next_page
 
@@ -882,9 +881,6 @@ _start:
 ; page containing that keyword.
 ; ============================================================================
 .handle_search:
-    cmp     byte [rel use_visibox], 1
-    jne     .search_fallback
-
     ; Display search keyword
     PRINT   STDOUT, tui_search_pre
     PRINT   STDOUT, command_buf
@@ -928,12 +924,7 @@ _start:
     call    delay_loop
     jmp     .loop_top
 
-.search_fallback:
-    ; No visibox — search not available, treat as think
-    lea     rdi, [rel command_buf]
-    lea     rsi, [rel no_vb_search_msg]
-    call    str_copy
-    jmp     .handle_think
+
 
 ; ============================================================================
 ; Handle SESSION action — VisiBox persistent shell
@@ -942,9 +933,6 @@ _start:
 ; persist across calls. Falls back to EXEC if VisiBox unavailable.
 ; ============================================================================
 .handle_session:
-    cmp     byte [rel use_visibox], 1
-    jne     .session_fallback
-
     ; Display session command
     PRINT   STDOUT, tui_session_pre
     PRINT   STDOUT, command_buf
@@ -992,10 +980,7 @@ _start:
     call    delay_loop
     jmp     .loop_top
 
-.session_fallback:
-    ; No VisiBox — session not available, delegate to EXEC handler
-    ; command_buf still has the original command
-    jmp     .handle_exec
+
 
 ; ============================================================================
 ; Handle THINK action

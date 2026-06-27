@@ -3,9 +3,8 @@
 ; ============================================================================
 ; Provides:
 ;   check_blocked            — Scan command_buf against dangerous patterns
-;   exec_command             — Unified entry: dispatches to visibox or /bin/sh
+;   exec_command             — Entry point: always uses VisiBox (no fallback)
 ;   exec_command_visibox     — Pipe JSON to VisiBox, parse structured response
-;   exec_command_fallback    — Legacy fork+exec /bin/sh -c <command>
 ;   visibox_json_escape      — Escape command_buf for JSON string safety
 ; ============================================================================
 
@@ -27,13 +26,13 @@ extern visibox_pipe_fds         ; 2 × dword — pipe for visibox stdin
 extern visibox_resp_pipe_fds    ; 2 × dword — pipe for visibox stdout
 extern visibox_response_raw     ; OUTPUT_BUF_SZ — raw JSON response from visibox
 extern visibox_resp_len         ; qword — bytes read from visibox response
-extern use_visibox              ; byte — 1 = use visibox, 0 = fallback
 
 ; ---------------------------------------------------------------------------
 ; External functions
 ; ---------------------------------------------------------------------------
 extern str_find                 ; str_find(rdi=haystack, rsi=needle) -> rax (ptr or 0)
 extern str_len                  ; str_len(rdi=str) -> rax (length)
+extern str_copy                 ; str_copy(rdi=dest, rsi=src) -> rax (length)
 
 ; ---------------------------------------------------------------------------
 ; Public API
@@ -41,7 +40,6 @@ extern str_len                  ; str_len(rdi=str) -> rax (length)
 global check_blocked
 global exec_command
 global exec_command_visibox
-global exec_command_fallback
 
 ; ============================================================================
 ;                         READ-ONLY DATA
@@ -130,31 +128,16 @@ check_blocked:
     ret
 
 ; ============================================================================
-; exec_command — Unified dispatch: VisiBox or fallback /bin/sh
+; exec_command — VisiBox-only command execution
 ; ----------------------------------------------------------------------------
-; Checks use_visibox flag. If set, calls exec_command_visibox.
-; Otherwise falls through to exec_command_fallback.
+; VisiBox is the sole and only command execution method.
+; No fallback. If VisiBox fails, the error propagates.
 ;
 ; Arguments : none (reads global command_buf)
 ; Returns   : rax = exit code (0-255)
 ; ============================================================================
 exec_command:
-    cmp     byte [rel use_visibox], 1
-    jne     exec_command_fallback
-
-    ; Try visibox first
     call    exec_command_visibox
-
-    ; If visibox returned special code 254, it means visibox binary
-    ; was not found or failed to exec — fall back to /bin/sh
-    cmp     eax, 254
-    jne     .exec_done
-
-    ; Mark fallback for future calls (avoid repeated execve failures)
-    mov     byte [rel use_visibox], 0
-    jmp     exec_command_fallback
-
-.exec_done:
     ret
 
 ; ============================================================================
@@ -170,7 +153,7 @@ exec_command:
 ;
 ; Arguments : none (reads global command_buf)
 ; Returns   : rax = exit code from VisiBox response
-;            rax = 254 if visibox binary not found (signals fallback)
+;            rax = 254 if visibox binary not found
 ; ============================================================================
 exec_command_visibox:
     push    rbp
@@ -412,12 +395,15 @@ exec_command_visibox:
     mov     eax, SYS_CLOSE
     syscall
 
-    ; --- execve(visibox_path, [visibox_path, "--visibox", NULL], envp) ---
-    ; VisiBox pipe mode requires --visibox flag
+    ; --- execve(visibox_path, [visibox_path, "--norc", "--visibox", NULL], envp) ---
+    ; --norc: skip bash rc files for clean output
+    ; --visibox: activate VisiBox JSON pipe mode
     xor     eax, eax
-    push    rax                     ; argv[2] = NULL
+    push    rax                     ; argv[3] = NULL
     lea     rax, [rel visibox_flag]
-    push    rax                     ; argv[1] = "--visibox"
+    push    rax                     ; argv[2] = "--visibox"
+    lea     rax, [rel visibox_norc]
+    push    rax                     ; argv[1] = "--norc"
     lea     rax, [rel visibox_path]
     push    rax                     ; argv[0] = visibox_path
 
@@ -525,7 +511,7 @@ exec_command_visibox:
     and     eax, 0xFF
     cmp     eax, 127
     jne     .vb_parse_response
-    ; Exit code 127 = execve failed (visibox not found) → signal fallback
+    ; Exit code 127 = execve failed (visibox not found) 
     mov     rax, 254
     jmp     .vb_cleanup
 
@@ -813,6 +799,15 @@ exec_command_visibox:
     mov     rax, 1
 
 .vb_cleanup:
+    ; If output is empty but exit code is 0, add hint so the model understands
+    test    r14, r14
+    jnz     .vb_cleanup_done
+    ; output_len == 0 — copy "(no stdout output)" to output_buf
+    lea     rdi, [rel output_buf]
+    lea     rsi, [rel vb_empty_output]
+    call    str_copy
+    mov     [rel output_len], rax
+.vb_cleanup_done:
     pop     r15
     pop     r14
     pop     r13
@@ -869,163 +864,3 @@ exec_command_visibox:
     ret
 
 ; ============================================================================
-; exec_command_fallback — Legacy: Fork+exec /bin/sh -c <command>
-; ----------------------------------------------------------------------------
-; Identical to the original exec_command (pre-visibox).
-; Arguments : none (reads global command_buf, shell_path, sh_flag)
-; Returns   : rax = WEXITSTATUS (bits 15..8 of wait_status, masked to 0xFF)
-; ============================================================================
-exec_command_fallback:
-    push    rbp
-    mov     rbp, rsp
-    push    rbx
-    push    r12
-    push    r13                     ; r13 = child PID
-    push    r14                     ; r14 = total bytes read (accumulator)
-    push    r15                     ; r15 = keeps 16-byte alignment
-
-    ; ------------------------------------------------------------------
-    ; 1. Create pipe: pipe(pipe_fds)
-    ; ------------------------------------------------------------------
-    lea     rdi, [rel pipe_fds]
-    mov     rax, SYS_PIPE
-    syscall
-    test    rax, rax
-    js      .fb_fork_error
-
-    ; ------------------------------------------------------------------
-    ; 2. Fork
-    ; ------------------------------------------------------------------
-    mov     rax, SYS_FORK
-    syscall
-    test    rax, rax
-    js      .fb_fork_error          ; negative = error
-    jz      .fb_child               ; zero     = child process
-    jmp     .fb_parent              ; positive = parent (rax = child pid)
-
-; ======================== CHILD PROCESS ================================
-.fb_child:
-    ; dup2(pipe_fds[1], STDOUT)
-    lea     rax, [rel pipe_fds]
-    mov     edi, [rax + 4]
-    mov     esi, STDOUT
-    mov     eax, SYS_DUP2
-    syscall
-
-    ; dup2(pipe_fds[1], STDERR)
-    lea     rax, [rel pipe_fds]
-    mov     edi, [rax + 4]
-    mov     esi, STDERR
-    mov     eax, SYS_DUP2
-    syscall
-
-    ; close(pipe_fds[0])
-    lea     rax, [rel pipe_fds]
-    mov     edi, [rax]
-    mov     eax, SYS_CLOSE
-    syscall
-
-    ; close(pipe_fds[1])
-    lea     rax, [rel pipe_fds]
-    mov     edi, [rax + 4]
-    mov     eax, SYS_CLOSE
-    syscall
-
-    ; Build argv: [shell_path, "-c", command_buf, NULL]
-    xor     eax, eax
-    push    rax                     ; NULL
-    lea     rax, [rel command_buf]
-    push    rax
-    lea     rax, [rel sh_flag]
-    push    rax
-    lea     rax, [rel shell_path]
-    push    rax
-
-    ; execve(shell_path, argv, envp)
-    lea     rdi, [rel shell_path]
-    mov     rsi, rsp
-    mov     rdx, [rel saved_envp]
-    mov     rax, SYS_EXECVE
-    syscall
-
-    EXIT    127
-
-; ======================== PARENT PROCESS ===============================
-.fb_parent:
-    mov     r13, rax
-
-    ; close(pipe_fds[1])
-    lea     rax, [rel pipe_fds]
-    mov     edi, [rax + 4]
-    mov     eax, SYS_CLOSE
-    syscall
-
-    ; Read loop
-    xor     r14d, r14d
-
-.fb_read_loop:
-    mov     rdx, OUTPUT_BUF_SZ - 1
-    sub     rdx, r14
-    jle     .fb_read_done
-
-    lea     rax, [rel pipe_fds]
-    mov     edi, [rax]
-    lea     rsi, [rel output_buf]
-    add     rsi, r14
-    mov     rax, SYS_READ
-    syscall
-
-    test    rax, rax
-    jle     .fb_read_done
-
-    add     r14, rax
-    jmp     .fb_read_loop
-
-.fb_read_done:
-    mov     [rel output_len], r14
-
-    lea     rax, [rel output_buf]
-    mov     byte [rax + r14], 0
-
-    lea     rax, [rel pipe_fds]
-    mov     edi, [rax]
-    mov     eax, SYS_CLOSE
-    syscall
-
-    ; wait4
-    mov     rdi, r13
-    lea     rsi, [rel wait_status]
-    xor     edx, edx
-    xor     r10d, r10d
-    mov     rax, SYS_WAIT4
-    syscall
-
-    mov     eax, [rel wait_status]
-    shr     eax, 8
-    and     eax, 0xFF
-
-    pop     r15
-    pop     r14
-    pop     r13
-    pop     r12
-    pop     rbx
-    pop     rbp
-    ret
-
-.fb_fork_error:
-    lea     rax, [rel pipe_fds]
-    mov     edi, [rax]
-    mov     eax, SYS_CLOSE
-    syscall
-    lea     rax, [rel pipe_fds]
-    mov     edi, [rax + 4]
-    mov     eax, SYS_CLOSE
-    syscall
-    mov     rax, -1
-    pop     r15
-    pop     r14
-    pop     r13
-    pop     r12
-    pop     rbx
-    pop     rbp
-    ret

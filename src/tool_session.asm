@@ -3,7 +3,7 @@
 ; ============================================================================
 ; Uses VisiBox daemon mode to run commands in a persistent shell where
 ; cd, export, alias, and other state-changing operations are kept across
-; invocations. Falls back to /bin/sh -c if VisiBox is not available.
+; invocations. VisiBox is REQUIRED — no fallback.
 ;
 ; Args:    none (reads command_buf = command to run in persistent shell)
 ; Returns:  eax = exit code (0 success, 1 error)
@@ -21,7 +21,6 @@
 extern command_buf
 extern output_buf
 extern output_len
-extern use_visibox
 extern visibox_response_raw
 extern saved_envp
 extern wait_status
@@ -39,13 +38,11 @@ extern vb_get_response_id
 extern vb_get_cursor
 extern vb_get_has_next
 extern check_blocked
-extern exec_command_fallback
 
 global tool_session_handler
 
 section .rodata
-session_fb_msg  db 'SESSION: VisiBox not available, using /bin/sh (state not persisted)', 0
-session_err_msg db 'SESSION: VisiBox error or not available.', 0
+session_err_msg db 'SESSION: VisiBox error.', 0
 
 section .text
 
@@ -59,10 +56,6 @@ tool_session_handler:
     call    check_blocked
     test    eax, eax
     jnz     .blocked
-
-    ; --- Check visibox available ---
-    cmp     byte [rel use_visibox], 1
-    jne     .use_fallback
 
     ; 1. Build session JSON with options
     call    vb_build_session
@@ -93,6 +86,15 @@ tool_session_handler:
     call    vb_extract_string
     mov     [rel output_len], r14
 
+    ; 4b. If output is empty, add hint
+    test    r14, r14
+    jnz     .has_output
+    lea     rdi, [rel output_buf]
+    lea     rsi, [rel vb_empty_output]
+    call    str_copy
+    mov     [rel output_len], rax
+.has_output:
+
     ; 5. Extract exit_code
     lea     rdi, [rel vb_key_exit_code]
     call    vb_parse_int
@@ -105,28 +107,12 @@ tool_session_handler:
     jmp     .done
 
 .visibox_failed:
-    ; VisiBox send/recv failed — fall back with warning
-    mov     byte [rel use_visibox], 0
-    ; Fall through
-
-.use_fallback:
-    ; No VisiBox daemon — use /bin/sh but warn that state won't persist
-    ; Put a warning prefix in output_buf, then run the command
+    ; VisiBox send/recv failed — report error
     lea     rdi, [rel output_buf]
-    lea     rsi, [rel session_fb_msg]
+    lea     rsi, [rel session_err_msg]
     call    str_copy
-    mov     rbx, rax                ; save length of warning
-
-    ; Append newline
-    mov     byte [rdi + rbx], 10    ; newline
-    inc     rbx
-
-    ; Run command via fallback — output goes to output_buf
-    ; We need to save the warning and restore it after
-    ; Actually, exec_command_fallback writes directly to output_buf
-    ; so the warning will be overwritten. For simplicity, just run fallback
-    ; and let the output speak for itself.
-    call    exec_command_fallback
+    mov     [rel output_len], rax
+    mov     eax, 1
     jmp     .done
 
 .blocked:

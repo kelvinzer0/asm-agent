@@ -17,7 +17,6 @@
 extern command_buf
 extern output_buf
 extern output_len
-extern use_visibox
 extern visibox_response_raw
 extern vb_saved_response_id
 
@@ -43,9 +42,6 @@ section .text
 tool_search_handler:
     push    rbp
     mov     rbp, rsp
-
-    cmp     byte [rel use_visibox], 1
-    jne     .err
 
     ; Check we have a response_id
     cmp     byte [rel vb_saved_response_id], 0
